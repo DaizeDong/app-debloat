@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "repository_kind": "skill",
+  "configuration": "runtime-storage-only",
+  "rationale": "app-debloat has no settings registry or credentials. Real runs produce per-app evidence ledgers, inventory snapshots, triage output, plans and verification records, which the operator stores in the PRIVATE app-debloat-config companion declared by storage.contract.json. Built per-app scripts keep their own journal and logs under %ProgramData%\\AppDebloat\\<app>\\ on the target machine, outside any repository.",
+  "documentation": [
+    "README.md",
+    "README_CN.md",
+    "skills/app-debloat/reference/safety.md",
+    "skills/app-debloat/reference/ledger.md"
+  ]
+}

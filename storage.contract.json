@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "tool": "app-debloat",
+  "max_bytes": 536870912,
+  "artifacts": [
+    {
+      "artifact_id": "companion-readme",
+      "path_pattern": "README.md",
+      "purpose": "States that this repository is the private DATA companion of app-debloat and must stay private",
+      "schema": "Markdown",
+      "producer": "Operator at companion creation",
+      "consumer_or_final_deliverable": "Anyone opening the companion",
+      "retention_rule": {"class": "core", "rule": "Keep while the companion exists."},
+      "rebuild_or_restore": "Rewrite from storage.contract.json"
+    },
+    {
+      "artifact_id": "companion-gitattributes",
+      "path_pattern": ".gitattributes",
+      "purpose": "Disables line-ending conversion so frozen evaluation files keep their hashed bytes",
+      "schema": "gitattributes",
+      "producer": "Operator at companion creation",
+      "consumer_or_final_deliverable": "Git",
+      "retention_rule": {"class": "core", "rule": "Keep while frozen evaluation files are present."},
+      "rebuild_or_restore": "Recreate with the single line '* -text'"
+    },
+    {
+      "artifact_id": "research",
+      "path_pattern": "research/**",
+      "purpose": "Step 0 design brief and per-lens research reports with sources",
+      "schema": "Markdown brief and JSON lens array",
+      "producer": "skill-smith Step 0 research workflow",
+      "consumer_or_final_deliverable": "Design decisions, documentation updates and later iterations",
+      "retention_rule": {"class": "core", "rule": "Keep the latest brief and its lens reports; replace them when a new Step 0 brief supersedes them."},
+      "rebuild_or_restore": "Restore from Git history or rerun the research workflow",
+      "max_bytes": 16777216
+    },
+    {
+      "artifact_id": "eval-policy",
+      "path_pattern": "eval/policy/**",
+      "purpose": "Evaluator-owned frozen acceptance policy, rubric, proof tasks and query sets",
+      "schema": "skill-smith acceptance policy schema 1 plus rubric and query JSON",
+      "producer": "Independent evaluator before implementation",
+      "consumer_or_final_deliverable": "acceptance_gate.py and the evaluator's G1 and G2 runs",
+      "retention_rule": {"class": "core", "rule": "Never edit in place; a new policy gets a new pinned hash and replaces this one after review."},
+      "rebuild_or_restore": "Not rebuildable; restore from Git history",
+      "max_bytes": 4194304
+    },
+    {
+      "artifact_id": "eval-runs",
+      "path_pattern": "eval/runs/**",
+      "purpose": "Raw G1 paired-run outputs, tool logs, G2 trigger trials, scores and the evidence manifest",
+      "schema": "Per-run output folders plus skill-smith evidence artifacts",
+      "producer": "Evaluator and the paired-run harness",
+      "consumer_or_final_deliverable": "Independent review and acceptance_gate.py",
+      "retention_rule": {"class": "core", "rule": "Keep the evidence bound to the accepted candidate and the latest attempt; remove superseded attempts once a newer candidate is accepted."},
+      "rebuild_or_restore": "Rerun the evaluator against the same candidate and policy",
+      "max_bytes": 268435456
+    },
+    {
+      "artifact_id": "app-runs",
+      "path_pattern": "apps/*/**",
+      "purpose": "Real per-app evidence ledgers, inventory snapshots, triage output, plans, manifests, hooks and verification records",
+      "schema": "reference/ledger.md, reference/manifest.md and inventory.ps1 JSON",
+      "producer": "app-debloat runs on the owner's machines",
+      "consumer_or_final_deliverable": "The owner, later re-runs after app upgrades, and public per-app repos (scripts and docs only)",
+      "retention_rule": {"class": "core", "rule": "Keep the current ledger, plan, manifest and the latest before/after snapshots per app; drop older snapshot pairs when a new verification passes."},
+      "rebuild_or_restore": "Rerun inventory and the pipeline on the machine; ledgers are restored from Git history",
+      "max_bytes": 134217728
+    }
+  ]
+}

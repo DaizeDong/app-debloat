@@ -1,0 +1,70 @@
+{
+    "_comment":  [
+                     "Spec v1 s9 -- every path in this repo belongs to exactly one class.",
+                     "TOOL    = code, SKILL.md, docs, and metrics ABOUT THE SKILL. Public, hand-written, no data.",
+                     "FIXTURE = tests and examples. Public, SYNTHETIC, produced by tools/make_fixtures.py.",
+                     "DATA    = anything a REAL RUN produced. Versioned in the verified PRIVATE companion,",
+                     "          never in this public tool repo. Resolve with fleet_guards.runtime.companion_resolver.",
+                     "",
+                     "Declare DATA paths here BEFORE the skill has anything to write, not after. A skill that",
+                     "appends real-run output to a git-tracked file will do it on every run, quietly, forever --",
+                     "that is how a public repo came to hold real-run output from the operator\u0027s own account, and no",
+                     "content scanner can see it (a ticker with an entry price has no email or phone in it).",
+                     "",
+                     "data_sealed = a path that HELD real data, was purged, and must stay dead. Checked like data,",
+                     "exempt from the .example schema requirement.",
+                     "",
+                     "An EMPTY declaration is not a free pass and it is not a place for an argument: check 4 reads",
+                     "the tracked file list, not this manifest, and fails any file wearing the shape of real-run",
+                     "output (a jsonl under metrics/, a runs/ tree, a dated file under an output dir, a live-ledger",
+                     "filename, a database). Six repos once shipped a careful paragraph here concluding they had",
+                     "nothing to declare, and a verifier committed metrics/live-runs.jsonl into every one of them",
+                     "with the boundary check still exiting 0. `tool` is that check\u0027s per-path allowlist, for a",
+                     "hand-written TOOL file that happens to wear the shape; write the reason next to it."
+                 ],
+    "data":  [
+
+             ],
+    "data_sealed":  [
+
+                    ],
+    "fixture":  [
+                    "examples/contoso-pinyin/contoso-pinyin.hooks.ps1",
+                    "examples/contoso-pinyin/contoso-pinyin.manifest.json",
+                    "examples/contoso-pinyin/ContosoPinyinDebloat.ps1",
+                    "examples/fabrikam-drive/fabrikam-drive.manifest.json",
+                    "examples/fabrikam-drive/FabrikamDriveDebloat.ps1"
+                ],
+    "tool":  [
+
+             ],
+    "_run_shape_probes":  [
+                              "apps/example-app/snapshots/2030-01-01-before.json",
+                              "apps/example-app/runs/2030-01-01/verification.md"
+                          ],
+    "_probes_comment":  [
+                            "THIS MANIFEST IS DELIBERATELY INCOMPLETE, and the boundary check will say so until you fill",
+                            "it. Two keys are yours to complete before this skill is published, and neither can be filled",
+                            "at scaffold time because neither is knowable before the skill has run.",
+                            "",
+                            "_audited      why the `data` list above is empty, or what is in it. Not a paragraph for its",
+                            "              own sake: name where this skill\u0027s real output actually goes and how you checked.",
+                            "_run_shape_probes",
+                            "              SCHEMATIC filenames naming what a real run of THIS skill writes. Check 4 objects",
+                            "              only to what it RECOGNISES, so a shape list that recognises nothing prints",
+                            "              exactly what a clean repo prints. Measured across the fleet on 2026-08-29: the",
+                            "              shared shape list matched 16 of 54 real output names, and 7 of 18 repos scored",
+                            "              zero, while every one of them writes output on every run.",
+                            "",
+                            "How to fill it: inspect shipped write paths and synthetic runs; inspect real output only",
+                            "when authorized. Score schematic output names with",
+                            "    python $(git config --get fleet.guards)/tools/data_boundary.py --explain \u003cname\u003e \u003cname\u003e ...",
+                            "Then rewrite each name into its SCHEMATIC form and commit that. A probe carrying a real",
+                            "ticker, mailbox handle, channel id or counterparty name is private data in a public repo even",
+                            "with no file behind it, which would reintroduce the leak under the banner of preventing it.",
+                            "A probe that matches no shape is reported by name: that is a gap in the shared list, not a",
+                            "reason to delete the probe."
+                        ],
+    "_data_home":  "Verified PRIVATE versioned app-debloat-config companion (override with $APP_DEBLOAT_DATA_DIR); no in-repo fallback.",
+    "_audited":  "2026-11-19 audit at creation. Shipped writers never target this tree: inventory.ps1 and pe_triage.py require an explicit -Out/--out and are documented to point at the PRIVATE companion; snapshot_diff.py prints to stdout; the engine and built per-app scripts write their journal, auto.log, history.log and preboot script only under %ProgramData%\\AppDebloat\\\u003capp\u003e\\ (admin-only ACL); setup_re_backend.ps1 installs only under %LOCALAPPDATA%. Real ledgers, snapshots, triage output, verification records, research and evaluation artifacts live in the private app-debloat-config companion (see storage.contract.json). examples/ is synthetic and regenerated by tools/make_fixtures.py. The engine\u0027s journal.jsonl, auto.log and history.log are written only under %ProgramData%\\AppDebloat\\\u003capp\u003e\\ and are not probed here because no repo-relative path can hold them."
+}

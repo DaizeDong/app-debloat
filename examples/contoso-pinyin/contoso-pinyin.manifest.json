@@ -1,0 +1,342 @@
+{
+  "schema": 1,
+  "id": "contoso-pinyin",
+  "name": "Contoso Pinyin IME",
+  "taskPrefix": "ContosoPinyin",
+  "profile": "ime",
+  "riskTier": "normal",
+  "installRoot": {
+    "envVar": "CONTOSOPINYIN_ROOT",
+    "uninstall": {
+      "displayName": "^Contoso Pinyin",
+      "publisher": "^Contoso"
+    },
+    "service": {
+      "name": "ContosoPinyinSvc",
+      "levelsUp": 2
+    },
+    "candidates": [
+      "%ProgramFiles(x86)%\\ContosoPinyin",
+      "%ProgramFiles%\\ContosoPinyin"
+    ],
+    "mustContain": [
+      "Components"
+    ]
+  },
+  "versionDir": {
+    "pattern": "^\\d+(\\.\\d+){3}$",
+    "mustContain": "ContosoTool.exe",
+    "registry": {
+      "path": "HKLM\\SOFTWARE\\WOW6432Node\\ContosoPinyin",
+      "name": "Version"
+    }
+  },
+  "pathVars": {
+    "userData": {
+      "envVar": "CONTOSOPINYIN_USERDATA",
+      "default": "%USERPROFILE%\\AppData\\LocalLow\\ContosoPinyin.users"
+    },
+    "sharedData": {
+      "envVar": "CONTOSOPINYIN_SHARED",
+      "default": "%ProgramData%\\ContosoPinyin"
+    },
+    "pdfDir": {
+      "envVar": "CONTOSOPINYIN_PDFDIR",
+      "default": "%LOCALAPPDATA%\\ContosoPDF"
+    }
+  },
+  "allowedRoots": [
+    "{userData}",
+    "{sharedData}",
+    "{pdfDir}"
+  ],
+  "version": {
+    "sources": [
+      {
+        "source": "registry",
+        "path": "HKLM\\SOFTWARE\\WOW6432Node\\ContosoPinyin",
+        "name": "Version"
+      },
+      {
+        "source": "dirname"
+      }
+    ],
+    "supported": {
+      "min": "12.0",
+      "max": "12.99"
+    }
+  },
+  "core": {
+    "files": [
+      "{ver}\\ContosoTool.exe",
+      "{ver}\\ContosoCloud.exe",
+      "{ver}\\ContosoImeBroker.exe"
+    ],
+    "processes": [
+      "ContosoTool.exe",
+      "ContosoCloud.exe",
+      "ContosoImeBroker.exe",
+      "ctfmon.exe"
+    ],
+    "restartable": [
+      "ContosoTool.exe",
+      "ContosoCloud.exe"
+    ],
+    "services": [],
+    "probe": "type pinyin in a test window launched by the skill; read the committed text back"
+  },
+  "options": [
+    {
+      "name": "NoSync",
+      "default": false,
+      "help": "Also stop account and dictionary sync (blocks ContosoUserSync.exe)."
+    },
+    {
+      "name": "BlockNet",
+      "default": false,
+      "help": "Also firewall ContosoTool.exe (it fetches skins and cell dictionaries too)."
+    }
+  ],
+  "actions": [
+    {
+      "id": "svc-repair",
+      "type": "service-disable",
+      "category": "repair",
+      "rationale": [
+        "L-R1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "ContosoPinyinSvc"
+      ],
+      "stop": true
+    },
+    {
+      "id": "task-toolkit",
+      "type": "task-disable",
+      "category": "promo",
+      "rationale": [
+        "L-P2"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "\\ContosoPinyin\\ContosoToolkits*"
+      ]
+    },
+    {
+      "id": "component-gate",
+      "type": "hook",
+      "category": "ai",
+      "rationale": [
+        "L-G1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "hook": "contoso-components",
+      "args": {
+        "disable": [
+          "AiChat",
+          "Pet",
+          "GameCenter",
+          "BizCenter"
+        ]
+      }
+    },
+    {
+      "id": "updater-files",
+      "type": "file-placeholder-dir",
+      "category": "updater",
+      "rationale": [
+        "L-R2",
+        "L-R3"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "createIfMissing": true,
+      "target": [
+        "{ver}\\ContosoUpdate.exe",
+        "{ver}\\ContosoDownload.exe",
+        "{root}\\Components\\ContosoComMgr.exe"
+      ]
+    },
+    {
+      "id": "sdk-dlls",
+      "type": "file-placeholder-dir",
+      "category": "telemetry",
+      "rationale": [
+        "L-T1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "{ver}\\beacon_sdk.dll",
+        "{ver}\\remote_cfg.dll",
+        "{root}\\Components\\biz_center\\*\\ad_sdk.dll"
+      ],
+      "stopHosts": [
+        "{ver}\\ContosoTool.exe",
+        "{ver}\\ContosoCloud.exe"
+      ]
+    },
+    {
+      "id": "ai-dirs",
+      "type": "dir-placeholder-file",
+      "category": "ai",
+      "rationale": [
+        "L-A1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "checkLoaded": true,
+      "target": [
+        "{root}\\Components\\AiChat",
+        "{root}\\Components\\Pet",
+        "{sharedData}\\AiCache"
+      ]
+    },
+    {
+      "id": "pdf-lock",
+      "type": "acl-deny-write",
+      "category": "promo",
+      "rationale": [
+        "L-P3"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "principal": "CurrentUser",
+      "emptyFirst": true,
+      "createIfMissing": true,
+      "target": [
+        "{pdfDir}"
+      ]
+    },
+    {
+      "id": "shellext",
+      "type": "shellext-block",
+      "category": "promo",
+      "rationale": [
+        "L-P4"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "clsids": [
+        "{0C0A0000-1111-4222-8333-444455556666}"
+      ],
+      "handlerMatch": "^\\s*ContosoShellExt",
+      "label": "Contoso Pinyin context menu"
+    },
+    {
+      "id": "toast",
+      "type": "toast-off",
+      "category": "ad",
+      "rationale": [
+        "L-A2"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "Contoso.Pinyin.Toast*",
+        "Contoso.Pinyin.Toast.Biz"
+      ]
+    },
+    {
+      "id": "store-switches",
+      "type": "reg-set",
+      "category": "ad",
+      "rationale": [
+        "L-A3"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": "HKCU\\Software\\ContosoPinyin\\Settings",
+      "kind": "DWord",
+      "values": {
+        "AiChatEnable": 0,
+        "PopupEnable": 0,
+        "PetAutorun": 0
+      }
+    },
+    {
+      "id": "biz-protocol",
+      "type": "reg-delete-key",
+      "category": "promo",
+      "rationale": [
+        "L-P5"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "HKLM\\SOFTWARE\\Classes\\contosobiz"
+      ]
+    },
+    {
+      "id": "ifeo",
+      "type": "ifeo-block",
+      "category": "updater",
+      "rationale": [
+        "L-R2",
+        "L-R4"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "ContosoComMgr.exe",
+        "ContosoUpdate.exe",
+        "ContosoBizLauncher.exe",
+        "ContosoAiChat.exe"
+      ]
+    },
+    {
+      "id": "env-ini",
+      "type": "preboot-file-edit",
+      "category": "ad",
+      "rationale": [
+        "L-G2"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "{userData}\\*\\env.ini"
+      ],
+      "section": "Setting",
+      "set": {
+        "AutoUpdate": "2",
+        "EnableAdsDispatch": "0",
+        "AiChatSwitch": "0"
+      },
+      "dropFromSections": [
+        "SyncMode"
+      ]
+    },
+    {
+      "id": "sync",
+      "type": "ifeo-block",
+      "category": "telemetry",
+      "rationale": [
+        "L-T2"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "when": "NoSync",
+      "target": [
+        "ContosoUserSync.exe"
+      ]
+    },
+    {
+      "id": "net",
+      "type": "firewall-block-program",
+      "category": "telemetry",
+      "rationale": [
+        "L-T3"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "when": "BlockNet",
+      "target": [
+        "{ver}\\ContosoTool.exe"
+      ]
+    }
+  ]
+}

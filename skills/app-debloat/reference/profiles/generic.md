@@ -1,0 +1,89 @@
+# Profiles: how to pick one
+
+A profile encodes what is DIFFERENT for one kind of app: where the junk lives, how it comes back, what gates it, what is core, which levers are safe, and how to prove core function still works. The pipeline (P0 to P7) is the same for every app; the profile only changes the answers to the per-app checkpoints. Load exactly one primary profile at P0, plus at most one secondary profile when the app straddles two kinds (for example a netdisk client built on Electron).
+
+## Decision table (P0)
+
+Answer in order; the first match is the primary profile.
+
+| Question (check on disk, not from memory) | Primary profile |
+|---|---|
+| Registered as a TSF text service (`HKLM\SOFTWARE\Microsoft\CTF\TIP\{CLSID}`) or ships `*.ime` files | `ime.md` |
+| Publisher is Tencent, or it ships `QQProtect`, `QPCore`, `WeixinUpdate.exe`, a QQNT `versions\config.json` | `tencent-im.md` |
+| Talks to device firmware or a vendor ACPI/WMI driver (fan, power mode, keyboard light, battery limit), or was preinstalled by the PC maker | `oem-utility.md` |
+| Cloud drive or download manager (sync engine, transfer queue, browser hand-off protocol) | `netdisk-downloader.md` |
+| Office or PDF suite (document editor, file associations, cloud docs namespace) | `office-suite.md` |
+| Main window is Chromium: `resources\app.asar`, `*.pak` + `libcef.dll`, `app-update.yml`, Squirrel `Update.exe` | `electron-cef-app.md` |
+| None of the above | this file, section "No profile fits" |
+
+Secondary profile: if the primary is netdisk, office, IM or OEM and the UI is Electron/CEF, also read `electron-cef-app.md` for the updater and resource gates. Record both in the analysis ledger.
+
+Quick evidence commands (read-only):
+
+```powershell
+# Electron / CEF markers under a resolved install root
+# (-Include with -LiteralPath does not filter on PS 5.1, so filter by name)
+Get-ChildItem -LiteralPath $root -Recurse -Depth 3 -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^(app\.asar|app-update\.yml|libcef\.dll|Update\.exe)$|\.pak$' } | Select-Object FullName
+# TSF registration
+Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\CTF\TIP' | ForEach-Object { (Get-ItemProperty "$($_.PSPath)\LanguageProfile\*\*" -ErrorAction SilentlyContinue).Description }
+# Publisher of every exe in the root
+Get-ChildItem -LiteralPath $root -Recurse -Filter *.exe | ForEach-Object { (Get-AuthenticodeSignature -LiteralPath $_.FullName).SignerCertificate.Subject } | Sort-Object -Unique
+```
+
+## What every profile states, and what the pipeline does with it
+
+| Profile section | Feeds pipeline step |
+|---|---|
+| Architecture and where junk lives | P1 inventory scope |
+| Launch, persistence, re-install vectors | P1 snapshot list, P3 vector matrix |
+| Gates | P2 gate hunt |
+| Core: do not touch | P0 core-function contract, P4 classification |
+| Levers (use / avoid) | P4 plan, P5 script primitives |
+| Integrity and ban risk | P0 risk tier (normal or out-of-process only) |
+| Verification probes | P6 core-function probe |
+| Public projects and recipes | P2/P3 hypotheses only, every claim re-verified on the installed version |
+
+Risk tiers used by every profile:
+
+- **normal**: in-install-dir changes allowed (placeholders, ACL on vendor files), after the integrity probe passed.
+- **out-of-process only**: no file in the install root is renamed, replaced, patched or ACL-locked; only services, tasks, IFEO on helper names, firewall rules by program path, updater staging dirs outside the install root, and vendor settings. Mandatory for account-bound apps with a documented ban history (Tencent IM) and whenever the integrity probe shows a self-check, self-repair or forced logout.
+
+## Lever order (shared by all profiles)
+
+Least likely to be flagged or reverted first:
+
+1. Vendor setting or vendor config gate (persisted where the app actually reads it).
+2. Same-name placeholder plus deny-write ACL on helper binaries and updater staging dirs.
+3. Disable (never delete) vendor services; record original start type and recovery actions.
+4. Disable (never delete) scheduled tasks.
+5. Outbound firewall rule by program path for a helper that has no core duty.
+6. IFEO `Debugger` for vendor-unique helper names only, pointing at a benign target; re-read after a delay because Defender can remove it.
+
+Never in any profile: binary patching, redistributing modified installers, extracted keys or decrypted configs in the public repo, hosts entries for shared CDNs or Microsoft domains, `sc delete`, disabling Defender, killing processes by name.
+
+## No profile fits
+
+Treat the app as unknown and derive the profile answers yourself during P1 to P3. Typical cases: download accelerators (Thunder/Xunlei), image viewers and compressors from portal vendors (2345 family), translation clients (Youdao Dictionary), driver-update utilities, game launchers.
+
+Checklist for an unknown app:
+
+- **Junk inventory**: every process it starts in 30 minutes of normal use plus one reboot; for each, signer, parent, command line, window titles (popups map to PIDs by enumerating top-level windows).
+- **Persistence**: `autorunsc` diff before and after install and after a day of use; include services with recovery actions, tasks (including those registered under a GUID name), Run keys in both views, Shell extensions, protocol handlers, file associations, IFEO keys the vendor wrote itself, WMI subscriptions.
+- **Re-install vectors**: own updater exe, a "repair" or "diagnose" exe, a SYSTEM service that writes the install dir, a per-user install under `%APPDATA%` that needs no admin to rewrite, MSIX/Store wrapper, scheduled "check" task, the main exe downloading a full installer on start.
+- **Gates**: look for plain ini/json/yml next to the exe first, then registry under `HKCU\Software\<Vendor>`, then resource archives (zip skins, pak, asar), then encrypted blobs (high entropy, base64, fixed header).
+- **Core contract**: one sentence per core feature and one probe per sentence before any change.
+- **Ban risk**: does any core feature need a server account? If yes, ask the owner for explicit consent for this app and default to out-of-process only until the integrity probe says otherwise.
+
+Example sources for this bucket (hypotheses only):
+
+- Youdao Dictionary client internals and update checks: https://blog.xlab.app/p/12f6b614/ (unverified for current versions).
+- Generic reversible OS-level primitives (ideas only, AGPL, do not copy code): https://github.com/undergroundwires/privacy.sexy
+- Declarative tweak manifest with original values: https://github.com/ChrisTitusTech/winutil (`config/tweaks.json`).
+- Lock-not-delete against self-repair, independent confirmation: https://github.com/ArabidopsisDev/SogouFucker and https://www.v2ex.com/t/678665
+- Persistence inventory: https://learn.microsoft.com/en-us/sysinternals/downloads/autoruns and https://github.com/last-byte/PersistenceSniper
+- Ad and tracker domain seeds (hypotheses, never pasted into hosts): https://github.com/privacy-protection-tools/anti-AD
+
+## Out of scope for every profile
+
+Uninstalling the app, recommending a replacement app, cracking or bypassing paid tiers, malware cleanup, browser ad blocking, Windows-wide debloat. Where a profile mentions a community alternative (for example an open-source replacement for an OEM utility), it is a note for the owner, not a lever the skill applies.

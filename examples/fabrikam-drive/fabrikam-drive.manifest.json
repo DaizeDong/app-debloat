@@ -1,0 +1,285 @@
+{
+  "schema": 1,
+  "id": "fabrikam-drive",
+  "name": "Fabrikam Drive",
+  "taskPrefix": "FabrikamDrive",
+  "profile": "electron-netdisk",
+  "riskTier": "normal",
+  "installRoot": {
+    "envVar": "FABRIKAMDRIVE_ROOT",
+    "uninstall": {
+      "displayName": "^Fabrikam Drive"
+    },
+    "candidates": [
+      "%LOCALAPPDATA%\\Programs\\FabrikamDrive"
+    ],
+    "mustContain": [
+      "FabrikamDrive.exe",
+      "resources\\app.asar"
+    ]
+  },
+  "pathVars": {
+    "updaterCache": {
+      "envVar": "FABRIKAMDRIVE_UPDATERCACHE",
+      "default": "%LOCALAPPDATA%\\fabrikam-drive-updater"
+    },
+    "appData": {
+      "envVar": "FABRIKAMDRIVE_APPDATA",
+      "default": "%APPDATA%\\FabrikamDrive"
+    }
+  },
+  "allowedRoots": [
+    "{updaterCache}",
+    "{appData}"
+  ],
+  "version": {
+    "sources": [
+      {
+        "source": "uninstall"
+      },
+      {
+        "source": "file",
+        "path": "{root}\\FabrikamDrive.exe"
+      },
+      {
+        "source": "text",
+        "path": "{root}\\resources\\build-info.json",
+        "regex": "\"version\"\\s*:\\s*\"([^\"]+)\""
+      }
+    ],
+    "supported": {
+      "min": "5.0",
+      "max": "5.99"
+    }
+  },
+  "core": {
+    "files": [
+      "{root}\\FabrikamDrive.exe",
+      "{root}\\FabrikamDriveHost.exe",
+      "{root}\\resources\\app.asar"
+    ],
+    "processes": [
+      "FabrikamDrive.exe",
+      "FabrikamDriveHost.exe"
+    ],
+    "restartable": [],
+    "services": [
+      "FabrikamDriveSyncSvc"
+    ],
+    "probe": "sign in with a test account, upload and download a small file"
+  },
+  "options": [
+    {
+      "name": "KeepAi",
+      "default": false,
+      "help": "Keep the AI assistant plugin."
+    },
+    {
+      "name": "BlockHosts",
+      "default": false,
+      "help": "Also sink ad and telemetry hosts in the hosts file (discouraged: flagged by security products)."
+    }
+  ],
+  "actions": [
+    {
+      "id": "updater-task",
+      "type": "task-disable",
+      "category": "updater",
+      "rationale": [
+        "L-R1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "\\FabrikamDrive\\FabrikamDriveUpdateTask*"
+      ]
+    },
+    {
+      "id": "updater-svc",
+      "type": "service-disable",
+      "category": "updater",
+      "rationale": [
+        "L-R2"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "FabrikamDriveUpdateSvc"
+      ],
+      "stop": true
+    },
+    {
+      "id": "updater-config",
+      "type": "file-placeholder-dir",
+      "category": "updater",
+      "rationale": [
+        "L-R3"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "createIfMissing": true,
+      "target": [
+        "{root}\\resources\\app-update.yml"
+      ]
+    },
+    {
+      "id": "updater-cache",
+      "type": "acl-deny-write",
+      "category": "updater",
+      "rationale": [
+        "L-R4"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "principal": "CurrentUser",
+      "emptyFirst": true,
+      "createIfMissing": true,
+      "target": [
+        "{updaterCache}"
+      ]
+    },
+    {
+      "id": "updater-exe",
+      "type": "file-placeholder-dir",
+      "category": "updater",
+      "rationale": [
+        "L-R5"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "{root}\\FabrikamUpdate.exe"
+      ]
+    },
+    {
+      "id": "ad-helpers",
+      "type": "file-placeholder-dir",
+      "category": "ad",
+      "rationale": [
+        "L-A1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "{root}\\ad_helper.exe",
+        "{root}\\resources\\plugins\\promo_popup.exe"
+      ]
+    },
+    {
+      "id": "ai-plugin",
+      "type": "dir-placeholder-file",
+      "category": "ai",
+      "rationale": [
+        "L-A2"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "unless": "KeepAi",
+      "target": [
+        "{root}\\resources\\plugins\\ai-assistant"
+      ]
+    },
+    {
+      "id": "shellext",
+      "type": "shellext-block",
+      "category": "promo",
+      "rationale": [
+        "L-P1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "clsids": [
+        "{FAB00000-CCCC-4DDD-8EEE-FFFF00001111}"
+      ],
+      "handlerMatch": "^FabrikamDrive",
+      "label": "Fabrikam Drive context menu"
+    },
+    {
+      "id": "toast",
+      "type": "toast-off",
+      "category": "ad",
+      "rationale": [
+        "L-A3"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "com.fabrikam.drive*"
+      ]
+    },
+    {
+      "id": "settings",
+      "type": "reg-set",
+      "category": "ad",
+      "rationale": [
+        "L-A4"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": "HKCU\\Software\\Fabrikam\\Drive",
+      "kind": "DWord",
+      "values": {
+        "ShowPromotions": 0,
+        "AiAssistantEnabled": 0
+      }
+    },
+    {
+      "id": "report-net",
+      "type": "firewall-block-program",
+      "category": "telemetry",
+      "rationale": [
+        "L-T1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "{root}\\FabrikamReport.exe"
+      ]
+    },
+    {
+      "id": "ifeo",
+      "type": "ifeo-block",
+      "category": "updater",
+      "rationale": [
+        "L-R5",
+        "L-A1"
+      ],
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "FabrikamUpdate.exe",
+        "FabrikamAdHelper.exe"
+      ]
+    },
+    {
+      "id": "promo-cache",
+      "type": "reg-delete-key",
+      "category": "promo",
+      "rationale": [
+        "L-P2"
+      ],
+      "reversible": true,
+      "reapply": false,
+      "effect": "reset",
+      "target": [
+        "HKCU\\Software\\Fabrikam\\Drive\\PromoCache"
+      ]
+    },
+    {
+      "id": "hosts",
+      "type": "hosts-block",
+      "category": "telemetry",
+      "rationale": [
+        "L-T2"
+      ],
+      "reversible": true,
+      "reapply": false,
+      "when": "BlockHosts",
+      "acknowledgeFlagging": true,
+      "target": [
+        "ads.fabrikam-drive.example",
+        "telemetry.fabrikam-drive.example"
+      ]
+    }
+  ]
+}
