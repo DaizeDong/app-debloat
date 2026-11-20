@@ -28,7 +28,7 @@ One app per run. Write every finding into the app's evidence ledger (`reference/
 | P1 Inventory | Every file, service, task, registration, process, connection; before/after use | `inventory.ps1` twice, `scripts/snapshot_diff.py`, autorunsc, Procmon |
 | P2 Launch chain and gates | Who starts each bloat component and what decides whether it runs | `scripts/pe_triage.py`, REA/Ghidra (`reference/re-backends.md`), `scripts/frida/trace_launch.js` |
 | P3 Re-install paths | Every vector that brings junk back, each with a proof it is closed | Procmon on target paths, service recovery actions |
-| P4 Plan | Each action: target, lever, anchor, original state, undo, check, reapply flag | `reference/levers.md` |
+| P4 Plan | `plan.md` in the five sections of `reference/plan-template.md`; each action: target, lever, evidence IDs and status, default or option, original state, undo, check, reapply flag | `reference/plan-template.md`, `reference/levers.md` |
 | P5 Build script | One idempotent single-file script | `reference/manifest.md`, `scripts/DebloatEngine.ps1` `New-AppScript` |
 | P6 Verify | Behavior after apply, after reboot, after a triggered repair or update | `inventory.ps1` + `snapshot_diff.py`, contract probes |
 | P7 Keep applied | `-Install`: re-assert blocking actions at logon and every 6 hours | the built script |
@@ -64,7 +64,7 @@ python "$S\snapshot_diff.py" <before.json> <after.json>
 ## Deliverables
 
 - `analysis.md`: the evidence ledger (component table, launch tree, gate table, re-install matrix, P0 to P4 checkpoint answers, hypotheses, negative searches).
-- `plan.md`: actions with lever, anchor, undo, check; what is kept and why; what cannot be blocked safely.
+- `plan.md`: follows `reference/plan-template.md` exactly: core preservation, targeted levers, durability, reversibility, feasibility and honesty. Includes what is kept and why, and what cannot be blocked safely.
 - `<App>Debloat.ps1`: built from the manifest; dry run by default.
 - Verification record: counts and probe results before, after apply, after reboot, after a triggered repair.
 
@@ -74,6 +74,9 @@ Ledgers, snapshots, journals and verification records are DATA: write them to th
 
 Full list in `reference/safety.md`. The ones that are easy to break:
 - Read-only until P4 is approved. Dry run is the default; `-Apply` executes only the printed plan.
+- When a task restricts writes to a folder, every helper script, scratch file and log goes inside that folder too (session scratch directories count as outside).
+- Under a read-only instruction, stop no process at all, including background tasks you started; let them finish or time out.
+- Default actions only for observed or anchored evidence; inferred and hypothesis actions ship inactive behind named options.
 - Touch only resolved install roots and enumerated keys. Refuse drive roots, `C:\Users`, `C:\Windows`, Program Files itself and empty paths. Use `-LiteralPath`. Stop processes by full path, then PID.
 - Prefer disable over delete; never `sc delete` a vendor service; restart any shell host you stop (Explorer, ctfmon).
 - Never publish extracted keys, decrypted configs, patched binaries or bypass DLLs. No binary patching in deliverables.
@@ -85,4 +88,4 @@ Full list in `reference/safety.md`. The ones that are easy to break:
 
 ## Progressive Loading
 
-This file is the only always-loaded part. Load on demand: `reference/pipeline.md` (stage detail), `reference/profiles/<category>.md`, `reference/levers.md`, `reference/manifest.md`, `reference/ledger.md`, `reference/re-backends.md`, `reference/safety.md`, and `reference/case-sogou.md` (a complete worked example).
+This file is the only always-loaded part. Load on demand: `reference/pipeline.md` (stage detail), `reference/profiles/<category>.md`, `reference/levers.md`, `reference/manifest.md`, `reference/ledger.md`, `reference/plan-template.md`, `reference/re-backends.md`, `reference/safety.md`, and `reference/case-sogou.md` (a complete worked example).

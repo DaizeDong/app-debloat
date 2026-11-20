@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "id": "fabrikam-drive",
   "name": "Fabrikam Drive",
   "taskPrefix": "FabrikamDrive",
@@ -16,7 +16,15 @@
     "mustContain": [
       "FabrikamDrive.exe",
       "resources\\app.asar"
-    ]
+    ],
+    "identity": {
+      "text": [
+        {
+          "file": "resources\\build-info.json",
+          "regex": "\"name\"\\s*:\\s*\"fabrikam-drive\""
+        }
+      ]
+    }
   },
   "pathVars": {
     "updaterCache": {
@@ -48,8 +56,9 @@
       }
     ],
     "supported": {
-      "min": "5.0",
-      "max": "5.99"
+      "versions": [
+        "5.3.1"
+      ]
     }
   },
   "core": {
@@ -78,6 +87,16 @@
       "name": "BlockHosts",
       "default": false,
       "help": "Also sink ad and telemetry hosts in the hosts file (discouraged: flagged by security products)."
+    },
+    {
+      "name": "RemoveUpdaterExe",
+      "default": false,
+      "help": "Replace FabrikamUpdate.exe with a placeholder. Promote by: start the client with the updater renamed and confirm sign-in and transfers."
+    },
+    {
+      "name": "BlockReporter",
+      "default": false,
+      "help": "Firewall FabrikamReport.exe. Promote by: a Sysmon 22 capture showing it contacts only telemetry hosts."
     }
   ],
   "actions": [
@@ -88,6 +107,7 @@
       "rationale": [
         "L-R1"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -101,6 +121,7 @@
       "rationale": [
         "L-R2"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -115,6 +136,7 @@
       "rationale": [
         "L-R3"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "createIfMissing": true,
@@ -129,6 +151,7 @@
       "rationale": [
         "L-R4"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "principal": "CurrentUser",
@@ -145,8 +168,11 @@
       "rationale": [
         "L-R5"
       ],
+      "evidence": "hypothesis",
       "reversible": true,
       "reapply": true,
+      "when": "RemoveUpdaterExe",
+      "evidenceNote": "client tolerance of a missing updater is untested",
       "target": [
         "{root}\\FabrikamUpdate.exe"
       ]
@@ -158,6 +184,7 @@
       "rationale": [
         "L-A1"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -172,6 +199,7 @@
       "rationale": [
         "L-A2"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "unless": "KeepAi",
@@ -186,6 +214,7 @@
       "rationale": [
         "L-P1"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "clsids": [
@@ -201,6 +230,7 @@
       "rationale": [
         "L-A3"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -214,6 +244,7 @@
       "rationale": [
         "L-A4"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": "HKCU\\Software\\Fabrikam\\Drive",
@@ -230,8 +261,11 @@
       "rationale": [
         "L-T1"
       ],
+      "evidence": "inferred",
       "reversible": true,
       "reapply": true,
+      "when": "BlockReporter",
+      "evidenceNote": "name and strings suggest crash and usage reports only",
       "target": [
         "{root}\\FabrikamReport.exe"
       ]
@@ -244,6 +278,7 @@
         "L-R5",
         "L-A1"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -258,6 +293,7 @@
       "rationale": [
         "L-P2"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": false,
       "effect": "reset",
@@ -272,6 +308,7 @@
       "rationale": [
         "L-T2"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": false,
       "when": "BlockHosts",

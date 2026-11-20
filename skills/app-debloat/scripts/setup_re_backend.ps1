@@ -61,7 +61,7 @@ $Pin = @{
     GhidraUrl     = 'https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip'
     GhidraSha256  = 'ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db'
     JdkMajor      = 21
-    PyModules     = @('pefile', 'capstone', 'lief', 'frida', 'frida_tools', 'procmon_parser')
+    PyModules     = @('pefile', 'capstone', 'lief', 'numpy', 'frida', 'frida_tools', 'procmon_parser')
 }
 
 # ---------- helpers ----------
@@ -416,7 +416,7 @@ function Install-PyMods {
     $py = Get-UserEnv 'APP_DEBLOAT_PYTHON'; if (-not $py) { $py = Find-Exe @('python.exe') }
     if (-not $py) { throw 'No python.exe; set APP_DEBLOAT_PYTHON.' }
     # Never --upgrade: an existing frida may be pinned on purpose (frida 17 dropped the Java bridge). Install only what is missing.
-    $need = @(); foreach ($pm in @(@('pefile','pefile'), @('capstone','capstone'), @('lief','lief'), @('frida','frida-tools'), @('procmon_parser','procmon-parser'))) { $chk = Invoke-Native $py @('-c', ('import ' + $pm[0])); if ($chk.Code -ne 0) { $need += $pm[1] } }
+    $need = @(); foreach ($pm in @(@('pefile','pefile'), @('capstone','capstone'), @('lief','lief'), @('numpy','numpy'), @('frida','frida-tools'), @('procmon_parser','procmon-parser'))) { $chk = Invoke-Native $py @('-c', ('import ' + $pm[0])); if ($chk.Code -ne 0) { $need += $pm[1] } }
     if (-not $need) { Write-Host '  python modules already present; nothing upgraded'; return }
     $r = Invoke-Native $py (@('-m', 'pip', 'install', '--user') + $need)
     Write-Host $r.Out; if ($r.Code -ne 0) { throw 'pip install failed.' }

@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "id": "contoso-pinyin",
   "name": "Contoso Pinyin IME",
   "taskPrefix": "ContosoPinyin",
@@ -21,7 +21,15 @@
     ],
     "mustContain": [
       "Components"
-    ]
+    ],
+    "identity": {
+      "text": [
+        {
+          "file": "Components\\components.json",
+          "regex": "\"id\"\\s*:\\s*\"Core\""
+        }
+      ]
+    }
   },
   "versionDir": {
     "pattern": "^\\d+(\\.\\d+){3}$",
@@ -62,8 +70,10 @@
       }
     ],
     "supported": {
-      "min": "12.0",
-      "max": "12.99"
+      "versions": [
+        "12.4.0.1234",
+        "12.3.9.1000"
+      ]
     }
   },
   "core": {
@@ -95,6 +105,16 @@
       "name": "BlockNet",
       "default": false,
       "help": "Also firewall ContosoTool.exe (it fetches skins and cell dictionaries too)."
+    },
+    {
+      "name": "RemoveSdkDlls",
+      "default": false,
+      "help": "Replace the beacon and remote-config SDK DLLs. Promote by: a frida LoadLibrary trace showing typing works without them."
+    },
+    {
+      "name": "RemoveAiFolders",
+      "default": false,
+      "help": "Replace the AI and pet component folders. Promote by: a typing probe with the folders renamed."
     }
   ],
   "actions": [
@@ -105,6 +125,7 @@
       "rationale": [
         "L-R1"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -119,6 +140,7 @@
       "rationale": [
         "L-P2"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -132,6 +154,7 @@
       "rationale": [
         "L-G1"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "hook": "contoso-components",
@@ -152,6 +175,7 @@
         "L-R2",
         "L-R3"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "createIfMissing": true,
@@ -168,8 +192,11 @@
       "rationale": [
         "L-T1"
       ],
+      "evidence": "inferred",
       "reversible": true,
       "reapply": true,
+      "when": "RemoveSdkDlls",
+      "evidenceNote": "loaded by ContosoTool.exe per import xrefs; core independence not yet probed",
       "target": [
         "{ver}\\beacon_sdk.dll",
         "{ver}\\remote_cfg.dll",
@@ -187,9 +214,12 @@
       "rationale": [
         "L-A1"
       ],
+      "evidence": "hypothesis",
       "reversible": true,
       "reapply": true,
       "checkLoaded": true,
+      "when": "RemoveAiFolders",
+      "evidenceNote": "folder names suggest AI add-ons; no load or launch edge anchored",
       "target": [
         "{root}\\Components\\AiChat",
         "{root}\\Components\\Pet",
@@ -203,6 +233,7 @@
       "rationale": [
         "L-P3"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "principal": "CurrentUser",
@@ -219,6 +250,7 @@
       "rationale": [
         "L-P4"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "clsids": [
@@ -234,6 +266,7 @@
       "rationale": [
         "L-A2"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -248,6 +281,7 @@
       "rationale": [
         "L-A3"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": "HKCU\\Software\\ContosoPinyin\\Settings",
@@ -265,6 +299,7 @@
       "rationale": [
         "L-P5"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -279,6 +314,7 @@
         "L-R2",
         "L-R4"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -295,6 +331,7 @@
       "rationale": [
         "L-G2"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "target": [
@@ -317,6 +354,7 @@
       "rationale": [
         "L-T2"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "when": "NoSync",
@@ -331,6 +369,7 @@
       "rationale": [
         "L-T3"
       ],
+      "evidence": "observed",
       "reversible": true,
       "reapply": true,
       "when": "BlockNet",

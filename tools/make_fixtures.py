@@ -25,15 +25,17 @@ TEMPLATE = SKILL / "templates" / "app-debloat.template.ps1"
 EXAMPLES = REPO / "examples"
 
 
-def act(id_, type_, category, rationale, reapply=True, **fields):
-    a = {"id": id_, "type": type_, "category": category, "rationale": rationale,
+def act(id_, type_, category, rationale, reapply=True, evidence="observed", **fields):
+    """One manifest action. evidence is the weakest ledger status behind it; anything below observed or
+    anchored must name its enabling option in `when` and stays inactive by default."""
+    a = {"id": id_, "type": type_, "category": category, "rationale": rationale, "evidence": evidence,
          "reversible": True, "reapply": reapply}
     a.update(fields)
     return a
 
 
 CONTOSO = {
-    "schema": 1,
+    "schema": 2,
     "id": "contoso-pinyin",
     "name": "Contoso Pinyin IME",
     "taskPrefix": "ContosoPinyin",
@@ -45,6 +47,9 @@ CONTOSO = {
         "service": {"name": "ContosoPinyinSvc", "levelsUp": 2},
         "candidates": ["%ProgramFiles(x86)%\\ContosoPinyin", "%ProgramFiles%\\ContosoPinyin"],
         "mustContain": ["Components"],
+        # Checked for every candidate, -InstallRoot and the env var included. A real manifest adds
+        # "signer": {"files": [...], "subject": "<vendor regex>"}; these synthetic files are unsigned.
+        "identity": {"text": [{"file": "Components\\components.json", "regex": "\"id\"\\s*:\\s*\"Core\""}]},
     },
     "versionDir": {
         "pattern": "^\\d+(\\.\\d+){3}$",
@@ -62,7 +67,7 @@ CONTOSO = {
             {"source": "registry", "path": "HKLM\\SOFTWARE\\WOW6432Node\\ContosoPinyin", "name": "Version"},
             {"source": "dirname"},
         ],
-        "supported": {"min": "12.0", "max": "12.99"},
+        "supported": {"versions": ["12.4.0.1234", "12.3.9.1000"]},
     },
     "core": {
         "files": ["{ver}\\ContosoTool.exe", "{ver}\\ContosoCloud.exe", "{ver}\\ContosoImeBroker.exe"],
@@ -74,6 +79,10 @@ CONTOSO = {
     "options": [
         {"name": "NoSync", "default": False, "help": "Also stop account and dictionary sync (blocks ContosoUserSync.exe)."},
         {"name": "BlockNet", "default": False, "help": "Also firewall ContosoTool.exe (it fetches skins and cell dictionaries too)."},
+        {"name": "RemoveSdkDlls", "default": False,
+         "help": "Replace the beacon and remote-config SDK DLLs. Promote by: a frida LoadLibrary trace showing typing works without them."},
+        {"name": "RemoveAiFolders", "default": False,
+         "help": "Replace the AI and pet component folders. Promote by: a typing probe with the folders renamed."},
     ],
     "actions": [
         act("svc-repair", "service-disable", "repair", ["L-R1"], target=["ContosoPinyinSvc"], stop=True),
@@ -82,10 +91,12 @@ CONTOSO = {
             args={"disable": ["AiChat", "Pet", "GameCenter", "BizCenter"]}),
         act("updater-files", "file-placeholder-dir", "updater", ["L-R2", "L-R3"], createIfMissing=True,
             target=["{ver}\\ContosoUpdate.exe", "{ver}\\ContosoDownload.exe", "{root}\\Components\\ContosoComMgr.exe"]),
-        act("sdk-dlls", "file-placeholder-dir", "telemetry", ["L-T1"],
+        act("sdk-dlls", "file-placeholder-dir", "telemetry", ["L-T1"], evidence="inferred", when="RemoveSdkDlls",
+            evidenceNote="loaded by ContosoTool.exe per import xrefs; core independence not yet probed",
             target=["{ver}\\beacon_sdk.dll", "{ver}\\remote_cfg.dll", "{root}\\Components\\biz_center\\*\\ad_sdk.dll"],
             stopHosts=["{ver}\\ContosoTool.exe", "{ver}\\ContosoCloud.exe"]),
-        act("ai-dirs", "dir-placeholder-file", "ai", ["L-A1"], checkLoaded=True,
+        act("ai-dirs", "dir-placeholder-file", "ai", ["L-A1"], checkLoaded=True, evidence="hypothesis", when="RemoveAiFolders",
+            evidenceNote="folder names suggest AI add-ons; no load or launch edge anchored",
             target=["{root}\\Components\\AiChat", "{root}\\Components\\Pet", "{sharedData}\\AiCache"]),
         act("pdf-lock", "acl-deny-write", "promo", ["L-P3"], principal="CurrentUser", emptyFirst=True,
             createIfMissing=True, target=["{pdfDir}"]),
@@ -105,7 +116,7 @@ CONTOSO = {
 }
 
 FABRIKAM = {
-    "schema": 1,
+    "schema": 2,
     "id": "fabrikam-drive",
     "name": "Fabrikam Drive",
     "taskPrefix": "FabrikamDrive",
@@ -116,6 +127,7 @@ FABRIKAM = {
         "uninstall": {"displayName": "^Fabrikam Drive"},
         "candidates": ["%LOCALAPPDATA%\\Programs\\FabrikamDrive"],
         "mustContain": ["FabrikamDrive.exe", "resources\\app.asar"],
+        "identity": {"text": [{"file": "resources\\build-info.json", "regex": "\"name\"\\s*:\\s*\"fabrikam-drive\""}]},
     },
     "pathVars": {
         "updaterCache": {"envVar": "FABRIKAMDRIVE_UPDATERCACHE", "default": "%LOCALAPPDATA%\\fabrikam-drive-updater"},
@@ -128,7 +140,7 @@ FABRIKAM = {
             {"source": "file", "path": "{root}\\FabrikamDrive.exe"},
             {"source": "text", "path": "{root}\\resources\\build-info.json", "regex": "\"version\"\\s*:\\s*\"([^\"]+)\""},
         ],
-        "supported": {"min": "5.0", "max": "5.99"},
+        "supported": {"versions": ["5.3.1"]},
     },
     "core": {
         "files": ["{root}\\FabrikamDrive.exe", "{root}\\FabrikamDriveHost.exe", "{root}\\resources\\app.asar"],
@@ -140,6 +152,10 @@ FABRIKAM = {
     "options": [
         {"name": "KeepAi", "default": False, "help": "Keep the AI assistant plugin."},
         {"name": "BlockHosts", "default": False, "help": "Also sink ad and telemetry hosts in the hosts file (discouraged: flagged by security products)."},
+        {"name": "RemoveUpdaterExe", "default": False,
+         "help": "Replace FabrikamUpdate.exe with a placeholder. Promote by: start the client with the updater renamed and confirm sign-in and transfers."},
+        {"name": "BlockReporter", "default": False,
+         "help": "Firewall FabrikamReport.exe. Promote by: a Sysmon 22 capture showing it contacts only telemetry hosts."},
     ],
     "actions": [
         act("updater-task", "task-disable", "updater", ["L-R1"], target=["\\FabrikamDrive\\FabrikamDriveUpdateTask*"]),
@@ -148,7 +164,8 @@ FABRIKAM = {
             target=["{root}\\resources\\app-update.yml"]),
         act("updater-cache", "acl-deny-write", "updater", ["L-R4"], principal="CurrentUser", emptyFirst=True,
             createIfMissing=True, target=["{updaterCache}"]),
-        act("updater-exe", "file-placeholder-dir", "updater", ["L-R5"], target=["{root}\\FabrikamUpdate.exe"]),
+        act("updater-exe", "file-placeholder-dir", "updater", ["L-R5"], evidence="hypothesis", when="RemoveUpdaterExe",
+            evidenceNote="client tolerance of a missing updater is untested", target=["{root}\\FabrikamUpdate.exe"]),
         act("ad-helpers", "file-placeholder-dir", "ad", ["L-A1"],
             target=["{root}\\ad_helper.exe", "{root}\\resources\\plugins\\promo_popup.exe"]),
         act("ai-plugin", "dir-placeholder-file", "ai", ["L-A2"], unless="KeepAi",
@@ -158,7 +175,8 @@ FABRIKAM = {
         act("toast", "toast-off", "ad", ["L-A3"], target=["com.fabrikam.drive*"]),
         act("settings", "reg-set", "ad", ["L-A4"], target="HKCU\\Software\\Fabrikam\\Drive", kind="DWord",
             values={"ShowPromotions": 0, "AiAssistantEnabled": 0}),
-        act("report-net", "firewall-block-program", "telemetry", ["L-T1"], target=["{root}\\FabrikamReport.exe"]),
+        act("report-net", "firewall-block-program", "telemetry", ["L-T1"], evidence="inferred", when="BlockReporter",
+            evidenceNote="name and strings suggest crash and usage reports only", target=["{root}\\FabrikamReport.exe"]),
         act("ifeo", "ifeo-block", "updater", ["L-R5", "L-A1"], target=["FabrikamUpdate.exe", "FabrikamAdHelper.exe"]),
         act("promo-cache", "reg-delete-key", "promo", ["L-P2"], reapply=False, effect="reset",
             target=["HKCU\\Software\\Fabrikam\\Drive\\PromoCache"]),
@@ -187,10 +205,22 @@ $Hooks['contoso-components'] = @{
         $want = @(AdGet (AdGet $Action 'args') 'disable' @())
         $on = @(@(([IO.File]::ReadAllText($path) | ConvertFrom-Json).components) | Where-Object { $want -contains $_.id -and $_.enabled } | ForEach-Object { $_.id })
         if (-not $on) { return }
-        @{ Key = 'components.json'; Desc = "Turn off components in ${path}: $($on -join ', ')"; Data = @{ path = $path; ids = $on }; Original = @{ enabled = $on } }
+        @{ Key = 'components.json'; Desc = "Turn off components in ${path}: $($on -join ', ')"; Data = @{ path = $path; ids = $on }
+           Original = @{ enabled = $on }; After = [ordered]@{ disabled = $on } }
     }
     Apply = { param($Ctx, $Data, $Item) Set-ContosoComponents $Data.path @($Data.ids) $false }
-    Undo  = { param($Ctx, $Data, $Original, $Entry) Set-ContosoComponents $Data.path @($Original.enabled) $true }
+    # Restore only while every component the hook turned off is still off; anything else is someone else's change.
+    Undo  = {
+        param($Ctx, $Data, $Original, $Entry)
+        if (-not (Test-Path -LiteralPath $Data.path -PathType Leaf)) { return "GONE $($Data.path) no longer exists" }
+        $ids = @($Original.enabled)
+        $now = @{}; foreach ($c in @(([IO.File]::ReadAllText($Data.path) | ConvertFrom-Json).components)) { $now[$c.id] = [bool]$c.enabled }
+        $off = @($ids | Where-Object { $now.ContainsKey($_) -and -not $now[$_] })
+        $on = @($ids | Where-Object { $now.ContainsKey($_) -and $now[$_] })
+        if ($on.Count -eq $ids.Count) { return "SKIP components $($ids -join ', ') are already on" }
+        if ($off.Count -ne $ids.Count) { return "CONFLICT $($Data.path): $(@($ids | Where-Object { $off -notcontains $_ }) -join ', ') changed since the hook turned them off; left as is" }
+        Set-ContosoComponents $Data.path $ids $true
+    }
 }
 """
 

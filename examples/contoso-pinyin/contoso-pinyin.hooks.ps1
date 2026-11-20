@@ -18,8 +18,20 @@ $Hooks['contoso-components'] = @{
         $want = @(AdGet (AdGet $Action 'args') 'disable' @())
         $on = @(@(([IO.File]::ReadAllText($path) | ConvertFrom-Json).components) | Where-Object { $want -contains $_.id -and $_.enabled } | ForEach-Object { $_.id })
         if (-not $on) { return }
-        @{ Key = 'components.json'; Desc = "Turn off components in ${path}: $($on -join ', ')"; Data = @{ path = $path; ids = $on }; Original = @{ enabled = $on } }
+        @{ Key = 'components.json'; Desc = "Turn off components in ${path}: $($on -join ', ')"; Data = @{ path = $path; ids = $on }
+           Original = @{ enabled = $on }; After = [ordered]@{ disabled = $on } }
     }
     Apply = { param($Ctx, $Data, $Item) Set-ContosoComponents $Data.path @($Data.ids) $false }
-    Undo  = { param($Ctx, $Data, $Original, $Entry) Set-ContosoComponents $Data.path @($Original.enabled) $true }
+    # Restore only while every component the hook turned off is still off; anything else is someone else's change.
+    Undo  = {
+        param($Ctx, $Data, $Original, $Entry)
+        if (-not (Test-Path -LiteralPath $Data.path -PathType Leaf)) { return "GONE $($Data.path) no longer exists" }
+        $ids = @($Original.enabled)
+        $now = @{}; foreach ($c in @(([IO.File]::ReadAllText($Data.path) | ConvertFrom-Json).components)) { $now[$c.id] = [bool]$c.enabled }
+        $off = @($ids | Where-Object { $now.ContainsKey($_) -and -not $now[$_] })
+        $on = @($ids | Where-Object { $now.ContainsKey($_) -and $now[$_] })
+        if ($on.Count -eq $ids.Count) { return "SKIP components $($ids -join ', ') are already on" }
+        if ($off.Count -ne $ids.Count) { return "CONFLICT $($Data.path): $(@($ids | Where-Object { $off -notcontains $_ }) -join ', ') changed since the hook turned them off; left as is" }
+        Set-ContosoComponents $Data.path $ids $true
+    }
 }

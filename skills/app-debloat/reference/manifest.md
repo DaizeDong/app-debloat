@@ -16,6 +16,7 @@ with BOM and CRLF, and refuses output that does not parse. Worked examples (synt
 
 | Field | Meaning |
 |---|---|
+| `schema` | `2` (required: evidence per action, `version.supported.versions`, `installRoot.identity`) |
 | `id` | lowercase id; state lives in `%ProgramData%\AppDebloat\<id>` |
 | `name` | display name |
 | `taskPrefix` | alphanumeric; tasks are `<Prefix>Debloat-Watch`, `-Preboot-<action>`, `-Restore-<action>` |
@@ -25,23 +26,56 @@ with BOM and CRLF, and refuses output that does not parse. Worked examples (synt
 | `versionDir` | optional: per-version subfolder, exposed as `{ver}` (else `{ver}` = `{root}`) |
 | `pathVars` | optional named folders outside the root: `{"userData": {"envVar": "X", "default": "%USERPROFILE%\\..."}}` |
 | `allowedRoots` | extra folders the engine may change (tokens allowed); each is refused if it is, or contains, a system location |
-| `version` | fingerprint sources and supported range |
+| `version` | fingerprint sources and the list of supported (inspected) versions |
 | `core` | the core-function contract |
-| `options` | `[{name, default, help}]`, become switches; actions opt in with `when` / `unless` |
+| `options` | `[{name, default, help}]`, become switches; actions opt in with `when` / `unless`. An option that enables an `inferred` or `hypothesis` action must default to false; its `help` names the probe that would promote the action |
 | `actions` | ordered list; executed in this order |
 
 **installRoot** (first hit wins): the `-InstallRoot` parameter, then `envVar`, then the Uninstall entry matched by
 `uninstall.displayName` / `uninstall.publisher` regexes (HKLM 64, HKLM 32, HKCU; uses `InstallLocation`, then the
 folder of `DisplayIcon`, then of `UninstallString`), then `service.name` ImagePath folder (`levelsUp` parents up),
-then `candidates[]`. A candidate counts only if every `mustContain` entry exists in it. Never hard-code a drive.
+then `candidates[]`. A candidate counts only if every `mustContain` entry exists in it and it passes `identity`.
+Never hard-code a drive.
+
+**installRoot.identity** (required): vendor checks that a look-alike folder cannot pass by file names alone. They
+apply to every candidate, the `-InstallRoot` parameter and the environment variable included. An explicit
+override (parameter or env var) that fails `mustContain` or `identity` is refused (exit 2); it never falls through
+to another candidate. Discovered candidates that fail are skipped with a WARN.
+
+| Key | Check |
+|---|---|
+| `signer` | `{files: [relative paths], subject: regex}`: each file has a `Valid` Authenticode signature whose signer subject matches. Use it whenever the vendor signs its binaries |
+| `text` | `[{file, regex}]`: a vendor file (product manifest, `build-info.json`, an INI) exists and its text matches |
+| `files` | `[relative paths]`: extra files that must exist (weak alone; at least one of `signer` or `text` is required) |
+
+```json
+"identity": { "signer": { "files": ["ExampleApp.exe"], "subject": "CN=AcmeCorp" },
+              "text": [ { "file": "resources\\build-info.json", "regex": "\"name\"\\s*:\\s*\"example-app\"" } ] }
+```
+
+After the root is chosen the engine resolves its real path (`GetFinalPathNameByHandle`: junctions, symlinks and
+`subst` drives followed, including every ancestor above the root) and applies the system-location refusals to both
+the written and the real path. The same is done for every `allowedRoots` entry, and for every target before it is
+changed (see Safety rules).
 
 **versionDir**: `registry {path, name}` names the active version when it exists with `mustContain`; otherwise the
 highest folder matching `pattern` that contains `mustContain`.
 
 **version.sources** (first non-empty wins): `registry {path, name, view}`, `uninstall` (DisplayVersion of the
 matched entry), `file {path}` (FileVersion), `dirname` (name of `{ver}`), `text {path, regex}` (capture group 1).
-`supported {min, max}`: outside the range, `-Apply` and `-Install` refuse (exit 2) unless `-Force`; dry run and
-`-Auto` warn. The fingerprint is `version|versionDirName`; `-Auto` writes a WARN to history.log when it changes.
+`supported` lists the versions the inventory actually inspected:
+
+```json
+"supported": { "versions": ["12.4.0.1234", "12.3.9.1000"] }
+```
+
+A version matches when it equals a listed string (or the same dotted number). A range is accepted only when the
+manifest opts in explicitly with `"allowRange": true, "min": "...", "max": "..."`; leave it out unless every
+version in the range was inspected. A version that is not supported, or that could not be read at all, is refused
+by `-Apply`, `-Install` and `-Auto` (exit 2, nothing changed) unless `-Force` is passed. `-Auto` additionally writes
+a `REFUSED ... WARN:` line to `history.log`; since the watch task never passes `-Force`, an update to an unlisted
+version stops re-application until the manifest is rebuilt. The dry run prints a WARN and still shows the plan.
+The fingerprint is `version|versionDirName`; `-Auto` writes a WARN to history.log when it changes.
 
 **core**: `files` (paths or globs, may not be changed, nor any folder that contains them), `processes` (never
 stopped, never IFEO-blocked), `restartable` (core processes the app relaunches by itself: may be stopped to
@@ -52,25 +86,46 @@ Path tokens everywhere: `{root}`, `{ver}`, `{<pathVar>}`, `%ENV%`. `*` and `?` e
 ## Actions
 
 Common fields: `id`, `type`, `category` (`ad`, `ai`, `telemetry`, `updater`, `repair`, `promo`), `rationale`
-(ledger item ids, required), `reversible` (default true; false items are left alone by `-Uninstall`), `reapply`
-(true only for blocking actions: the watch task re-confirms them), `effect` (`block` default, or `reset`;
-`reset` with `reapply: true` is rejected), `when` / `unless` (option name).
+(ledger item ids, required), `evidence` (required, see below), `evidenceNote` (what is unproven), `reversible`
+(default true; false items are left alone by `-Uninstall`), `reapply` (true only for blocking actions: the watch
+task re-confirms them), `effect` (`block` default, or `reset`; `reset` with `reapply: true` is rejected), `when` /
+`unless` (option name), `backup` (placeholder types only, default true; see the table).
 
-| type | fields | does | undo |
+**evidence** is the weakest ledger status among the action's `rationale` entries, copied verbatim
+(`reference/ledger.md`): `observed`, `anchored`, `inferred` or `hypothesis`.
+
+- `observed` and `anchored` actions are active by default.
+- `inferred` and `hypothesis` actions are INACTIVE by default. They must name their enabling option in `when`
+  (that option must default to false, and `unless` is not allowed on them). They run only when the user passes that
+  switch; `-Install` saves it, so `-Auto` keeps re-applying an action the user enabled.
+- Every plan (dry run, `-Apply`, `-Install`, `-Auto`) prints the inactive actions after the numbered changes:
+
+```
+[INACTIVE] [updater-exe] file-placeholder-dir, updater: evidence is hypothesis (client tolerance of a missing updater is untested). Enable with -RemoveUpdaterExe
+```
+
+  and each planned item shows its status (`file-placeholder-dir, updater, evidence observed, reapply`).
+- `New-AppScript` appends the gated action ids to the option's help text.
+
+Every undo first compares the current state with the state the tool wrote (the journal's `after`). It restores the
+original only when they are equal, reports SKIP when the original is already back, GONE when the object no longer
+exists, and CONFLICT (left untouched) for anything else.
+
+| type | fields | does | undo (only from the state the tool wrote) |
 |---|---|---|---|
-| `service-disable` | `target[]` names, `stop` | `sc config start= disabled`, stops it if running | restores Auto/Manual start mode |
-| `task-disable` | `target[]` `\Path\Name*` | disables matching tasks | re-enables those that were enabled |
-| `file-placeholder-dir` | `target[]`, `stopHosts[]`, `createIfMissing` | stops processes by full path, deletes the file, creates a same-named folder (a repairer cannot write the file back) | removes the empty folder, lists the file for reinstall |
-| `dir-placeholder-file` | `target[]`, `checkLoaded` (default true), `createIfMissing` | replaces a folder with a read-only file; deferred with WARN while any of its DLLs is loaded | removes the file, lists the folder for reinstall |
-| `acl-deny-write` | `target[]`, `principal` (`CurrentUser`, `Users`, SID), `emptyFirst`, `createIfMissing` | deny write/append ACE (staging and download folders) | removes the deny ACE, removes a folder it created |
-| `ifeo-block` | `target[]` bare exe names | IFEO `Debugger` = `%SystemRoot%\System32\AppDebloat-blocked\<id>.exe` (never exists) | deletes only its own Debugger value |
+| `service-disable` | `target[]` names, `stop` | `sc config start= disabled`, stops it if running | if still Disabled, restores Auto (delayed-auto kept) or Manual |
+| `task-disable` | `target[]` `\Path\Name*` | disables matching tasks; records each task's action identity (Execute, Arguments, ClassId) | re-enables only if the task still runs the recorded action |
+| `file-placeholder-dir` | `target[]`, `stopHosts[]`, `createIfMissing`, `backup` | copies the file to `backup\` (hash-checked), stops processes by full path, deletes the file, creates a same-named folder (a repairer cannot write the file back) | if the folder is still empty: removes it and restores the file from the backup; without a backup it is listed for reinstall |
+| `dir-placeholder-file` | `target[]`, `checkLoaded` (default true), `createIfMissing`, `backup` | copies the folder to `backup\` (file count checked), replaces it with an empty read-only file; deferred with WARN while any of its DLLs is loaded or the check fails. Set `backup: false` for very large folders | if the file is still empty: removes it and restores the folder from the backup, else lists it for reinstall |
+| `acl-deny-write` | `target[]`, `principal` (`CurrentUser`, `Users`, SID), `emptyFirst`, `createIfMissing` | adds exactly the missing deny rights (WriteData, AppendData, WriteEA, WriteAttributes; inherited by children on folders) for that SID; records which rights it added | takes away exactly those rights from that SID's entry with the same inheritance; other deny entries and rights stay; removes a folder it created |
+| `ifeo-block` | `target[]` bare exe names | IFEO `Debugger` = `%SystemRoot%\System32\AppDebloat-blocked\<id>.exe` (never exists) | deletes only its own Debugger value, the key only if it created it |
 | `reg-set` | `target` key, `name`+`value` or `values{}`, `kind` (DWord, QWord, String, ExpandString, MultiString), `view` | sets values, records the old ones | restores or deletes each value |
-| `reg-delete-key` | `target[]`, optional `match` regex over subkeys, `view` | `reg export` to the state folder, then deletes; TrustedInstaller-owned keys are a WARN, not a FAIL | `reg import` |
+| `reg-delete-key` | `target[]`, optional `match` regex over subkeys, `view` | `reg export` to the state folder, then deletes; TrustedInstaller-owned keys are a WARN, not a FAIL | `reg import`, unless the key exists again (CONFLICT) |
 | `shellext-block` | `clsids[]`, `handlerMatch`, `handlerParents[]`, `removeClsid`, `label` | `Shell Extensions\Blocked` values, deletes the CLSID keys and matching ContextMenuHandlers (HKLM and HKCU, 64-bit and WOW6432Node) | removes Blocked values, imports deleted keys |
 | `toast-off` | `target[]` AppUserModelIDs (wildcards match existing) | `Notifications\Settings\<id>` `Enabled=0` | restores |
-| `firewall-block-program` | `target[]` program paths, `direction` | rule `AppDebloat <id> <action> <exe> <hash>` in group `AppDebloat-<id>` | removes the rule |
-| `hosts-block` | `target[]` domains, `acknowledgeFlagging` | discouraged, always printed as WARN; skipped unless acknowledged; refuses Microsoft domains | removes its marked lines |
-| `preboot-file-edit` | `target[]` INI glob, `section`, `set{}`, `dropFromSections[]` | for settings the app keeps in shared memory and flushes back on exit: registers a one-shot SYSTEM startup task that edits the file before logon and deletes itself after success | cancels a pending edit, or schedules a restore of the original values before next logon |
+| `firewall-block-program` | `target[]` program paths, `direction` | rule `AppDebloat <id> <action> <exe> <hash>` in group `AppDebloat-<id>` | removes that rule only if its group and program are still the recorded ones |
+| `hosts-block` | `target[]` domains, `acknowledgeFlagging` | discouraged, always printed as WARN; skipped unless acknowledged; refuses Microsoft domains | removes exactly the lines it added; the rest of the file is kept byte for byte |
+| `preboot-file-edit` | `target[]` INI glob, `section`, `set{}`, `dropFromSections[]` | for settings the app keeps in shared memory and flushes back on exit: registers a one-shot SYSTEM startup task that edits the file before logon and deletes itself after success | cancels a pending edit (if the task still runs the recorded script), or schedules a restore before next logon for each file whose values are still exactly the written ones |
 | `hook` | `hook` name, `args{}` | app-specific logic, see below | the hook's `Undo` |
 
 Technique choice, least flagged first: placeholder and ACL, then service disable, then task disable, then a
@@ -89,11 +144,16 @@ For gates that do not fit a type (an encrypted config, a vendor component table)
 ```powershell
 $Hooks['vendor-gate'] = @{
     Plan  = { param($Ctx, $Action) <# return nothing when compliant, else one hashtable per change #>
-              @{ Key = 'unique-id'; Desc = 'what changes'; Data = @{...}; Original = @{...} } }
+              @{ Key = 'unique-id'; Desc = 'what changes'; Data = @{...}; Original = @{...}; After = [ordered]@{...} } }
     Apply = { param($Ctx, $Data, $Item) ... }
     Undo  = { param($Ctx, $Data, $Original, $Entry) ... }   # optional; missing = WARN on -Uninstall
 }
 ```
+
+`After` is the state Apply writes; it is journaled before Apply runs and reaches Undo as `$Entry.after`. Undo must
+restore only when the current state still equals it, and return a string: `CONFLICT <why>` (left as is),
+`SKIP <why>` (already original), `GONE <why>`, `WARN <why>`, `REINSTALL <path>`, or nothing on success. A WARN or
+CONFLICT keeps the journal (see `-Uninstall`). `examples/contoso-pinyin` shows the pattern.
 
 Hooks run inside the script, so they may call `Expand-AdPath`, `Assert-AdPathSafe` (call it before touching any
 path), `Stop-AdProcessByPath`, `Get-AdRegValue`, `Set-AdRegValue`, `Update-AdIni`, `Say` and `AdGet`. `$Action.args`
@@ -104,14 +164,26 @@ derive it at run time from the user's own install and keep it in memory.
 
 | Mode | Behavior |
 |---|---|
-| (none) | dry run: resolves, prints the numbered plan, changes nothing, needs no elevation |
+| (none) | dry run: resolves, prints the numbered plan and the inactive actions, changes nothing, needs no elevation |
 | `-Apply` | builds the same plan, prints it, then executes exactly those items |
-| `-Install` | copies the script to `%ProgramData%\AppDebloat\<id>\<Prefix>Debloat.ps1` (SYSTEM and Administrators full, Users read), saves options to `options.json`, registers `<Prefix>Debloat-Watch` (logon + every 6 h, current user, highest, `conhost --headless`), then applies |
-| `-Auto` | used by the watch task: saved options, only `reapply: true` actions, transcript to `auto.log`, one line per run in `history.log` (changes, failures, WARN text, fingerprint changes) |
-| `-Uninstall` | replays the journal in reverse, removes its tasks and the state folder, prints the vendor files that need a reinstall; works even when the app is gone |
+| `-Install` | refuses if a task named `<Prefix>Debloat-Watch` exists that the journal does not record; copies the script to `%ProgramData%\AppDebloat\<id>\<Prefix>Debloat.ps1` (SYSTEM and Administrators full, Users read), saves options to `options.json`, journals and registers `<Prefix>Debloat-Watch` (logon + every 6 h, current user, highest, `conhost --headless`), then applies |
+| `-Auto` | used by the watch task: saved options, only `reapply: true` actions, transcript to `auto.log`, one line per run in `history.log` (changes, failures, WARN text, fingerprint changes, refusals) |
+| `-Uninstall` | replays the journal in reverse (see below), prints the vendor files that need a reinstall; works even when the app is gone |
 
-Exit 0 ok, 1 at least one FAIL (plan-time refusals included), 2 refused before planning (not elevated, invalid
-manifest, app not found, root refused, unsupported version). WARN-only items do not count as changes.
+At most one of `-Apply`, `-Install`, `-Uninstall`, `-Auto` per run: a combination is refused with exit 2 before
+anything else runs (`Resolve-AdMode`).
+
+`-Uninstall` undoes only what the journal records as written by this tool: tasks, IFEO values and firewall rules
+are removed only when the journal created them and they still match the recorded identity. Each entry that is
+undone cleanly gets an `undone` journal line, so a rerun never replays it. Any WARN, CONFLICT or failure is counted:
+the journal and the state folder are kept, a summary lists every item left behind, and the exit code is 1. Resolve
+the items by hand and run `-Uninstall` again. When nothing is left, the engine deletes only the files it writes in
+the state folder (journal, options, state, logs, backups, exports, its own scripts) and the folder if it is then
+empty.
+
+Exit 0 ok, 1 at least one FAIL (plan-time refusals included) or an `-Uninstall` that left items behind, 2 refused
+before any change (more than one mode, not elevated, invalid manifest, app not found, root refused or failing the
+identity check, unsupported or unreadable version, a foreign watch task). WARN-only items do not count as changes.
 
 Install the watch task only after the core-function probe passed (P6); a task that re-applies a broken plan every
 6 hours is worse than none.
@@ -121,9 +193,14 @@ Install the watch task only after the core-function probe passed (P6); a task th
 - Paths: refuses empty paths, drive roots, UNC, `%SystemRoot%` and System32/SysWOW64, Program Files roots,
   ProgramData, `C:\Users`, the user profile and its AppData roots, TEMP. A target must lie under the install root or
   an `allowedRoots` entry (an allowed root, but never the install root, may itself be the target). Any reparse
-  point between the base and the target is refused. `..` is normalized before the check.
+  point between the base and the target is refused. `..` is normalized before the check. The target's real path
+  (nearest existing ancestor resolved by handle, the missing rest appended) must also lie under the base's real
+  path, so a junction above the root cannot carry a change outside it; a path that cannot be resolved is refused.
 - Core contract: refuses actions on core files, folders containing them, core services and core processes.
-- Processes are stopped only by exact full-path match, then by PID.
+- Processes are stopped only by exact full-path match, then by PID. A process of that name whose path cannot be
+  read is an error, not a non-match, and a process still running after the stop is a FAIL.
+- Failed queries are never read as absence: a failed service, scheduled task or firewall-rule query fails the
+  action (or the undo step) instead of being treated as "not present".
 - IFEO: bare vendor exe names only; refuses generic names (updater.exe, setup.exe, crashpad_handler.exe, ...) and
   any name that exists in System32 or SysWOW64.
 - Registry deletes: refuses keys shallower than three levels, shared roots (`Software\Classes\CLSID`, Run, ...)
@@ -132,9 +209,18 @@ Install the watch task only after the core-function probe passed (P6); a task th
 
 ## Journal
 
-`%ProgramData%\AppDebloat\<id>\journal.jsonl`, one JSON object per line, written before each change:
-`ts, app, actionId, actionType, prim, key, desc, reversible, version, data, original`. The `key` identifies the
-changed object (`fs:<path>`, `reg:<hive><view>\<key>|<value>`, `ifeo:<exe>`, `svc:<name>`, ...). The first line for
-a key is never rewritten: a rerun after the vendor reset something does not overwrite the true original. Deleted
-registry keys are exported to `regkeys\` next to it. The journal is DATA: it stays on the machine and never goes
-into a public repo.
+`%ProgramData%\AppDebloat\<id>\journal.jsonl`, append-only, one JSON object per line.
+
+- `kind: "change"` is written BEFORE the change it describes (write-ahead), so an interrupted `-Apply` can be
+  rolled back: `ts, app, actionId, actionType, prim, key, desc, reversible, evidence, version, data, original,
+  after`. `original` is the state found; `after` is the state the tool is about to write.
+- The `key` identifies the changed object (`fs:<path>`, `reg:<hive><view>\<key>|<value>`, `ifeo:<exe>`,
+  `svc:<name>`, `acl:<path>|<sid>`, `watchtask:<name>`, ...). The first `original` for a key wins forever: a rerun
+  after the vendor reset something does not overwrite the true original. A later line for the same key only
+  updates `after` (for example when a rebuilt manifest writes a different value).
+- `kind: "undone"` closes a key after `-Uninstall` restored it cleanly.
+- If the run stops between the journal line and the change, the undo finds the original still in place and reports
+  SKIP; a half-made change shows up as CONFLICT instead of being overwritten.
+
+Deleted registry keys are exported to `regkeys\`, replaced files and folders are copied to `backup\` before the
+journal line is written. The journal and backups are DATA: they stay on the machine and never go into a public repo.

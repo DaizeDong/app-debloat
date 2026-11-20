@@ -4,8 +4,8 @@
 For each file: imports and delay imports with launch-relevant APIs flagged, launch-relevant
 strings (ASCII and UTF-16LE), and the code addresses that reference each string or flagged
 import slot. x86 absolute operands (push imm32, mov reg imm32, call [abs]) and x64 RIP-relative
-operands (lea, mov, call [rip+disp]) are found with a vectorized byte scan and confirmed by
-disassembling with capstone. Functions come from .pdata on x64 and from prologue and call-target
+operands (lea, mov, call [rip+disp]) are found with a byte scan (vectorized with numpy, or a
+slower pure-Python loop when numpy is missing) and confirmed by disassembling with capstone. Functions come from .pdata on x64 and from prologue and call-target
 heuristics on x86. Output is JSON; a short summary goes to stderr.
 
 Binary content is untrusted data: strings and decompiled text are reported, never followed.
@@ -13,25 +13,38 @@ Binary content is untrusted data: strings and decompiled text are reported, neve
 Usage:
   python pe_triage.py FILE [FILE ...] [--out triage.json] [--grep REGEX] [--rea]
 
-Needs pefile, capstone and numpy. --rea adds Ghidra decompilation of the top functions through
+Needs pefile and capstone; numpy is optional (without it the scan is slower and the JSON notes
+say so; APP_DEBLOAT_NO_NUMPY=1 forces that path for testing). --rea adds Ghidra decompilation of the top functions through
 the REA CLI when `rea doctor --provider ghidra --json` passes; otherwise it is skipped with a note.
 """
 import argparse
 import bisect
 import hashlib
 import json
+import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
+from array import array
+from collections import Counter
 
 try:
-    import numpy as np
     import pefile
     import capstone
     from capstone import x86_const
 except ImportError as e:  # pragma: no cover
     sys.exit(f"pe_triage: missing dependency ({e}). pip install pefile capstone numpy")
+
+np = None
+if os.environ.get("APP_DEBLOAT_NO_NUMPY") != "1":
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+NO_NUMPY_NOTE = ("numpy not available: used the pure-Python byte scan (same results, slower). "
+                 "pip install numpy to speed it up.")
 
 TOOL_VERSION = "1.0.0"
 
@@ -158,10 +171,44 @@ def extract_strings(img, minlen, grep, cap):
     return found, False
 
 
+def _dwords(data, off, signed):
+    """Little-endian 32-bit values at byte offsets off, off+4, ... (pure-Python path)."""
+    cnt = (len(data) - off) // 4
+    a = array("i" if signed else "I")
+    a.frombytes(bytes(data[off:off + cnt * 4]))
+    if sys.byteorder != "little":
+        a.byteswap()
+    return a
+
+
+def _rel32_sites(data, opcodes):
+    """(position, signed rel32) for each opcode byte followed by 4 bytes (pure-Python path)."""
+    pat = re.compile(b"[" + b"".join(re.escape(bytes([o])) for o in opcodes) + b"](?=[\x00-\xff]{4})")
+    unpack = struct.Struct("<i").unpack_from
+    return [(m.start(), unpack(data, m.start() + 1)[0]) for m in pat.finditer(data)]
+
+
 def candidate_positions(data, targets, is64, sec_rva, base):
     """Byte positions whose 4-byte operand may encode one of the target VAs."""
     if len(data) < 8 or not len(targets):
         return []
+    if np is None:
+        hits = []
+        if is64:
+            # t = sec_rva + pos + 4 + extra + disp must be a target RVA, for any extra in (0, 1, 2, 4)
+            want = {t - base - e for t in targets for e in (0, 1, 2, 4)}
+            for off in range(4):
+                adj = sec_rva + off + 4
+                for k, d in enumerate(_dwords(data, off, True)):
+                    if adj + 4 * k + d in want:
+                        hits.append(off + 4 * k)
+        else:
+            want = set(targets)
+            for off in range(4):
+                for k, v in enumerate(_dwords(data, off, False)):
+                    if v in want:
+                        hits.append(off + 4 * k)
+        return sorted(set(hits))
     buf = np.frombuffer(data, dtype=np.uint8)
     n = len(buf) - 3
     v = (buf[:n].astype(np.int64) | (buf[1:n + 1].astype(np.int64) << 8) |
@@ -221,6 +268,16 @@ def rel32_callers(img, dest_rvas):
     out = {}
     if not dest_rvas:
         return out
+    if np is None:
+        want = set(dest_rvas)
+        for sec in img.code:
+            if len(sec["data"]) < 6:
+                continue
+            for i, rel in _rel32_sites(sec["data"], (0xE8, 0xE9)):
+                dest = sec["rva"] + i + 5 + rel
+                if dest in want:
+                    out.setdefault(int(dest), []).append(int(sec["rva"] + i))
+        return out
     want = np.array(sorted(dest_rvas), dtype=np.int64)
     for sec in img.code:
         buf = np.frombuffer(sec["data"], dtype=np.uint8)
@@ -256,6 +313,12 @@ def function_index(img):
         for pat in (b"\x55\x8b\xec", b"\x8b\xff\x55\x8b\xec"):
             for m in re.finditer(re.escape(pat), d):
                 starts.add(sec["rva"] + m.start())
+        if np is None:
+            if len(d) > 6:
+                lo, hi = sec["rva"], sec["rva"] + len(d)
+                cnt = Counter(sec["rva"] + i + 5 + rel for i, rel in _rel32_sites(d, (0xE8,)))
+                starts.update(t for t, c in cnt.items() if c >= 2 and lo <= t < hi)
+            continue
         buf = np.frombuffer(d, dtype=np.uint8)
         if len(buf) > 6:
             idx = np.nonzero(buf[:-4] == 0xE8)[0].astype(np.int64)
@@ -319,14 +382,23 @@ def triage(path, args, grep):
     # data refs (pointer tables in non-code sections): one hop only
     ptr = "<u8" if img.is64 else "<u4"
     width = 8 if img.is64 else 4
-    str_vas = np.array(sorted(img.base + s["rva"] for s in strings), dtype=np.uint64)
     by_va = {img.base + s["rva"]: s for s in strings}
+    if np is not None:
+        str_vas = np.array(sorted(by_va), dtype=np.uint64)
     for sec in img.sections:
-        if sec["exec"] or len(sec["data"]) < width or not len(str_vas):
+        if sec["exec"] or len(sec["data"]) < width or not by_va:
             continue
         d = sec["data"][: len(sec["data"]) // width * width]
-        vals = np.frombuffer(d, dtype=ptr).astype(np.uint64)
-        for i in np.nonzero(np.isin(vals, str_vas))[0].tolist()[:5000]:
+        if np is None:
+            vals = array("Q" if img.is64 else "I")
+            vals.frombytes(bytes(d))
+            if sys.byteorder != "little":
+                vals.byteswap()
+            idxs = [i for i, v in enumerate(vals) if v in by_va][:5000]
+        else:
+            vals = np.frombuffer(d, dtype=ptr).astype(np.uint64)
+            idxs = np.nonzero(np.isin(vals, str_vas))[0].tolist()[:5000]
+        for i in idxs:
             s = by_va[int(vals[i])]
             if len(s["data_refs"]) < args.max_xrefs:
                 s["data_refs"].append(sec["rva"] + i * width)
@@ -514,6 +586,9 @@ def main():
     grep = re.compile("|".join(f"(?:{g})" for g in args.grep), re.I) if args.grep else None
 
     report = {"schema": "app-debloat.pe-triage/1", "tool_version": TOOL_VERSION, "files": [], "notes": []}
+    if np is None:
+        report["notes"].append(NO_NUMPY_NOTE)
+        print(f"[pe_triage] {NO_NUMPY_NOTE}", file=sys.stderr)
     rea_exe = None
     if args.rea:
         rea_exe, note = rea_backend(min(args.rea_timeout, 180))

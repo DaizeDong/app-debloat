@@ -7,9 +7,14 @@
 .DESCRIPTION
   Dry run by default: resolves the install, prints the exact plan and changes nothing.
   -Apply executes exactly the printed plan (elevated PowerShell). Idempotent: a second run plans nothing.
-  Every change is journaled with the state it replaced (first run wins) under
-  %ProgramData%\AppDebloat\@@APP_ID@@\journal.jsonl, and -Uninstall replays that journal in reverse.
-  Exit code: 0 ok, 1 a step failed, 2 refused (not elevated, not installed, unsupported version, bad manifest).
+  Pass at most one of -Apply, -Install, -Uninstall, -Auto; a combination is refused before anything runs.
+  Every change is journaled before it is made, with the state it replaced (first run wins) and the state it
+  writes, under %ProgramData%\AppDebloat\@@APP_ID@@\journal.jsonl. -Uninstall replays that journal in reverse and
+  restores an original only where the current state is still the one this script wrote.
+  Actions backed only by inferred or hypothesis evidence are INACTIVE: the plan lists them with the option that
+  enables them. Versions not listed in the manifest are refused by -Apply, -Install and -Auto unless -Force.
+  Exit code: 0 ok, 1 a step failed or -Uninstall left items behind, 2 refused before any change (more than one
+  mode, not elevated, not installed, identity check failed, unsupported version, bad manifest).
 
 .PARAMETER Apply
   Execute the plan. Needs an elevated PowerShell.
@@ -20,17 +25,21 @@
   only the blocking actions. Install only after the core-function checks passed.
 
 .PARAMETER Uninstall
-  Undo everything in the journal in reverse order, remove the tasks and the state folder.
-  Files removed from the vendor install come back only by reinstalling the app; the list is printed.
+  Undo the journal in reverse order: restores each original only if the current state is still what this script
+  wrote (otherwise CONFLICT, left alone), removes only the tasks, IFEO values and firewall rules it recorded,
+  restores replaced vendor files from the backup taken before the change. Any WARN, CONFLICT or failure keeps the
+  journal and the state folder and exits 1; run it again after resolving them.
 
 .PARAMETER Auto
   Used by the @@APP_PREFIX@@Debloat-Watch task: saved options, blocking actions only, log to auto.log and history.log.
+  On a version the manifest does not list it changes nothing, logs a WARN line and exits 2.
 
 .PARAMETER InstallRoot
-  Use this folder as the install root instead of resolving it.
+  Use this folder as the install root instead of resolving it. It must still pass the manifest's vendor
+  identity checks (expected files, signer, content), and its real path (junctions resolved) is what is checked.
 
 .PARAMETER Force
-  Apply even when the installed version is outside the manifest's supported range.
+  Apply, install or auto-apply even when the installed version is not in the manifest's supported list.
 
 #@@OPTION_HELP@@
 
@@ -67,7 +76,8 @@ $Hooks = @{}
 if (-not (Get-Command Invoke-AppDebloat -ErrorAction SilentlyContinue)) {
     throw 'This is the unbuilt template. Build a per-app script with New-AppScript (scripts/DebloatEngine.ps1).'
 }
-$mode = if ($Uninstall) { 'Uninstall' } elseif ($Auto) { 'Auto' } elseif ($Install) { 'Install' } elseif ($Apply) { 'Apply' } else { 'Plan' }
+$mode = Resolve-AdMode -Apply:$Apply -Install:$Install -Uninstall:$Uninstall -Auto:$Auto
+if (-not $mode) { exit 2 }
 $opts = @{}
 $optProp = ($ManifestJson | ConvertFrom-Json).PSObject.Properties['options']
 if ($optProp) { foreach ($o in @($optProp.Value)) { $opts[$o.name] = [bool](Get-Variable -Name $o.name -ValueOnly) } }

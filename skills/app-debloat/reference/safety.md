@@ -55,7 +55,18 @@ These are not optional. If a step would break one, stop and record it in the led
 - Original state is captured on first touch only; later runs never overwrite the journal's originals.
 - The installed script lives in an admin-only state directory under `%ProgramData%`. The task never downloads code.
 
-## 8. Public versus private data
+## 8. Restricted runs
+
+- When a task restricts writes to one folder, every helper script, scratch file, capture, log and generated output goes inside that folder too. Session scratch directories, `%TEMP%` and the user profile count as outside. If a tool cannot be pointed there, do not run it and record why.
+- Under a read-only instruction, stop no process at all: not the app's, not a shell host, and not background tasks you started yourself (traces, captures, long scans). Let them finish or time out, and plan their timeouts before starting them.
+- A read-only run also skips probes that change state (integrity probe, deleting a file to trigger repair, toggle tests). Their vectors stay unproven in the ledger.
+
+## 9. Evidence and defaults
+
+- Default actions only for `observed` or `anchored` evidence (`ledger.md`). `inferred` and `hypothesis` actions ship inactive behind named options.
+- No plan or report claims complete blocking without a `VER` entry behind it. Leaving a component untouched for an evidenced reason is a valid outcome.
+
+## 10. Public versus private data
 
 | Class | What | Where |
 |---|---|---|

@@ -55,22 +55,39 @@ Add a kind only when none of these fit, and document it at the top of the ledger
 | Status | Meaning | Minimum anchor |
 |---|---|---|
 | `observed` | Seen happening or read directly from live state | runtime capture (`cmdline`, `log`, `net`, `frida`) or a live `reg`/`file`/`snapshot` read |
-| `inferred` | Follows from static evidence that ties the pieces together, not yet seen at run time | `pe` or `xref` anchors that connect the string or config read to the API call site |
+| `anchored` | A complete static chain in this exact build: the config read or string reaches the launch or load API with no reasoning gap, plus a toggle test where the claim is a GATE | `pe` or `xref` anchors for every hop, each paired with the file hash |
+| `inferred` | Partly tied: some hops anchored, the rest reasoned; or anchored on another version only | the anchors that exist, plus the missing hop named in `notes` |
 | `hypothesis` | Plausible but not tied: a string exists with no xref, a name looks like an updater, a forum post says so | none required; say what would confirm it |
 | `negative` | Tested and refuted, or searched and absent | the search or test performed and its coverage |
 
 Rules:
 
 - No anchor, no fact. A claim without one is `hypothesis`, whatever the confidence.
-- A string in a binary is not an edge. It becomes `inferred` only with an xref chain to a launch or
-  load API (`pe_triage.py` `xrefs`, `table_xrefs` or `callers`), and `observed` only when a capture
-  shows the launch.
+- A string in a binary is not an edge. It becomes `inferred` with a partial xref chain, `anchored`
+  only when every hop to the launch or load API is anchored (`pe_triage.py` `xrefs`, `table_xrefs`
+  or `callers`), and `observed` only when a capture shows the launch.
+- Strength order: `observed` > `anchored` > `inferred` > `hypothesis`. A claim built on other
+  entries (`depends_on`) is no stronger than the weakest of them.
 - `negative` must state coverage. "No scheduled task references the root" from a non-elevated
   inventory is not negative evidence for protected tasks; record the `access_failures` and `notes`
   that applied, or rerun elevated.
 - Promote by adding an anchor, never by rewording the claim. Demote when an anchor stops holding.
 - Prefer early probes over more reading: when an `inferred` EDGE or GATE drives a plan action,
-  confirm it with frida, Procmon or a toggle test before the action ships.
+  confirm it with frida, Procmon or a toggle test before the action ships as a default.
+
+## Status travels into the plan and the manifest
+
+Every plan action and every manifest action carries one evidence status: the weakest status among
+the ledger entries it relies on (its `because` list, the manifest `rationale`). The manifest copies
+that status verbatim into the action's `evidence` field (and gates `inferred`/`hypothesis` actions
+with `when`); it never upgrades it. The engine refuses a schema 2 manifest whose actions lack it.
+
+- `observed` or `anchored`: may be a default action.
+- `inferred` or `hypothesis`: ships inactive behind a named option, with the probe that would promote
+  it written next to the option's help text. It becomes a default only after the ledger entry is
+  promoted and the plan and manifest are regenerated.
+- `negative` entries never justify an action; they justify leaving something alone.
+- When a ledger entry is demoted or marked `stale`, every action that cites it drops with it.
 
 ## Anchor types
 
@@ -121,18 +138,21 @@ output back into the binary or the analysis database as if it were vendor text.
 - Open hypotheses: every `hypothesis` entry with the probe that would settle it. This list is the
   next work item when a run resumes.
 
-`plan.md` lists actions; each action names the entries that justify it and the check that proves it:
+`plan.md` follows `plan-template.md` (five mandatory sections). Each action names the entries that
+justify it, the copied status, and the check that proves it:
 
 ```
 A-04  Block PopNews.exe by placeholder directory plus deny-write ACL
-      because: L-EDGE-003, L-RI-004      core impact: none (L-CORE-001 does not depend on it)
+      because: L-EDGE-003 (observed), L-RI-004 (observed)   status: observed   default
+      core impact: none (L-CORE-001 does not depend on it)
       verify:  process absent after login and after the repair trigger in L-RI-004 -> record L-VER-007
 ```
 
 Rules for the plan:
 
-- An action whose `because` entries are all `hypothesis` is a probe, not a block: run the probe,
-  update the ledger, then decide.
+- An action whose status is `inferred` or `hypothesis` is an option, not a default. When all its
+  entries are `hypothesis`, it is a probe first: run the probe, update the ledger, then decide.
+- A decision to leave a component untouched is recorded with its entries, like an action.
 - An action touching a component listed under any `L-CORE` entry needs that contract's probe in its
   `verify` line.
 - Every applied action gets a `VER` entry for each check (after apply, after reboot, after the

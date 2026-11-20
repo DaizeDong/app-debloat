@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here (Keep a Changelog style).
 
+## [0.1.1] - 2026-11-20
+### Changed
+- Engine safety fixes from the first G1 review: exclusive modes, version refusal in Auto, real-path checks, evidence-gated actions, conflict-aware undo, failure-preserving uninstall; plan template; numpy dependency and pure-Python fallback in pe_triage.
+
 ## [0.1.0] - 2026-11-19
 ### Added
 - Skill entry with the P0 to P7 pipeline and the mandatory app-specific checkpoints.
