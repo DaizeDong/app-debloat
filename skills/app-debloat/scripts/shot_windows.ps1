@@ -40,6 +40,13 @@
 .PARAMETER MinSize
   Skip windows narrower or shorter than this many pixels. Default 16.
 
+.PARAMETER BubbleTitleRegex
+  Extra case-insensitive title regex for known side-effect bubbles. Built in: Chromium's
+  "Restore pages?" / "didn't shut down correctly" bubble (English and Chinese), which appears
+  after stop_app.ps1 force-closed a Chromium-based app. A small window (under 700x400 physical
+  pixels) whose title matches gets tags = ['restore_pages_bubble'] in the index and in the
+  console line, so it is not read as a new popup. It is still captured.
+
 .EXAMPLE
   .\shot_windows.ps1 -Root "$env:LOCALAPPDATA\ExampleApp" -Out D:\private\shots -Tag before
   .\shot_windows.ps1 -ImagePathRegex '\\ExampleApp\\[^\\]+\.exe$' -Out D:\private\shots
@@ -50,7 +57,8 @@ param(
     [string[]]$Root,
     [Parameter(Mandatory = $true)][string]$Out,
     [string]$Tag,
-    [int]$MinSize = 16
+    [int]$MinSize = 16,
+    [string]$BubbleTitleRegex
 )
 $ErrorActionPreference = 'Stop'
 if (-not $ImagePathRegex -and -not $Root) { throw 'Pass -ImagePathRegex <regex> and/or -Root <dir>.' }
@@ -192,6 +200,17 @@ function Test-Match([string]$img) {
     $false
 }
 
+# Chromium's crash-restore bubble ("Restore pages?" / "... didn't shut down correctly"), also in zh-CN and zh-TW.
+# The Chinese alternatives are .NET \u escapes, so this file stays ASCII.
+$restoreRx = New-Object regex(('restore pages|did(n''t| not) shut down correctly|\u6062\u590d(\u9875\u9762|\u7f51\u9875)|\u6062\u5fa9(\u9801\u9762|\u7db2\u9801)|\u672a\u6b63\u786e\u5173\u95ed|\u672a\u6b63\u78ba\u95dc\u9589' +
+    $(if ($BubbleTitleRegex) { '|' + $BubbleTitleRegex } else { '' })), 'IgnoreCase')
+function Get-WindowTags($w) {
+    $tags = @()
+    $vw = $w.VR - $w.VL; $vh = $w.VB - $w.VT
+    if ($w.Title -and $vw -lt 700 -and $vh -lt 400 -and $restoreRx.IsMatch($w.Title)) { $tags += 'restore_pages_bubble' }
+    ,$tags
+}
+
 $outDir = [IO.Path]::GetFullPath($Out)
 [void][IO.Directory]::CreateDirectory($outDir)
 $prefix = $(if ($Tag) { ($Tag -replace '[^\w.-]', '_') + '_' } else { '' })
@@ -209,6 +228,7 @@ foreach ($w in [AdShot]::VisibleTopLevel()) {
         hwnd = ('0x{0:x}' -f $w.Hwnd); pid = [int]$w.Pid; image = $img; class = $w.Cls; title = $w.Title
         rect = @($w.L, $w.T, $w.R, $w.B); visible_rect = @($w.VL, $w.VT, $w.VR, $w.VB)
         window_dpi = $null; file = $null; blank = $null; print_flags = $null; skipped = $null; error = $null
+        tags = @(Get-WindowTags $w)
     }
     if ($w.Iconic) { $e.skipped = 'minimized (restoring it would be input; not done)' }
     elseif ($w.Cloaked) { $e.skipped = 'cloaked by DWM' }
@@ -229,7 +249,8 @@ foreach ($w in [AdShot]::VisibleTopLevel()) {
 $doc = [ordered]@{
     schema = 'app-debloat.shots/1'; captured_at = (Get-Date).ToUniversalTime().ToString('o')
     dpi_awareness = $dpiNow; dpi_set = $dpiSet
-    match = [ordered]@{ image_path_regex = $ImagePathRegex; roots = @($Root) }
+    match = [ordered]@{ image_path_regex = $ImagePathRegex; roots = @($Root); bubble_title_regex = $BubbleTitleRegex }
+    tag_meaning = [ordered]@{ restore_pages_bubble = 'Chromium crash-restore bubble, a side effect of a forced close (stop_app.ps1); not a new popup' }
     windows = $index.ToArray()
 }
 $idxPath = Join-Path $outDir ($prefix + 'index.json')
@@ -237,9 +258,11 @@ $idxPath = Join-Path $outDir ($prefix + 'index.json')
 
 $shot = @($index | Where-Object { $_.file }).Count
 $blankN = @($index | Where-Object { $_.blank }).Count
-Write-Host ("windows matched: {0}, captured: {1}, blank: {2}, skipped or failed: {3}, dpi: {4}" -f $index.Count, $shot, $blankN, ($index.Count - $shot), $dpiNow)
+$bubbleN = @($index | Where-Object { $_.tags -contains 'restore_pages_bubble' }).Count
+Write-Host ("windows matched: {0}, captured: {1}, blank: {2}, skipped or failed: {3}, restore-pages bubbles: {4}, dpi: {5}" -f $index.Count, $shot, $blankN, ($index.Count - $shot), $bubbleN, $dpiNow)
 foreach ($e in $index) {
     $state = $(if ($e.file) { $e.file + $(if ($e.blank) { ' (blank)' } else { '' }) } elseif ($e.skipped) { 'skipped: ' + $e.skipped } else { 'error: ' + $e.error })
-    Write-Host ("  pid {0} {1} '{2}' -> {3}" -f $e.pid, $e.class, $e.title, $state)
+    $tagText = $(if (@($e.tags).Count) { ' [' + (@($e.tags) -join ', ') + ': side effect of a forced close, not a new popup]' } else { '' })
+    Write-Host ("  pid {0} {1} '{2}' -> {3}{4}" -f $e.pid, $e.class, $e.title, $state, $tagText)
 }
 Write-Host "index: $idxPath"

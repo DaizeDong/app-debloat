@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here (Keep a Changelog style).
 
+## [0.1.4] - 2026-11-21
+### Changed
+- Improvements from the first live apply/verify/install runs: recursive taskPath matching with visible search counts, knownFailure, access-denied diagnostics, -Install registers only after a clean apply, quiet existence lookups, module-check exemptions for isolated security and VM processes plus -IgnoreUninspectable/checkLoadedExempt, unused-option warnings; snapshot_diff case-insensitive paths and --journal/--expect-removed; list_modules.ps1; prior task state in elevated_readonly; docs on security-suite vetoes and no third-party database copies.
+
 ## [0.1.3] - 2026-11-21
 ### Changed
 - Improvements from the first live runs: Toolhelp32 module check by full path (32-bit included), ini-set and json-set actions, core.preserve, Options Not Selected in dry runs, root provenance and identity in the header; inventory fixes (autorunsc lookup, -AppFile, runtime-name exclusion, per-root caps, DNS cache, pending updates); snapshot_diff --out/--summary; new shot_windows, launch_monitor, stop_app, elevated_readonly and frida file/stack tracers; pipeline steps for half-applied updates, first-launch self-update and UAC handling; chromium-fork profile and Baidu 8.x notes.

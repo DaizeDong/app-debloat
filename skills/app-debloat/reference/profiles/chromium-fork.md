@@ -17,7 +17,8 @@ Desktop apps that ship a whole Chromium browser under their own brand and hang o
 | Vector | Form | Notes |
 |---|---|---|
 | Updater services woken by the main exe | SYSTEM services set to Manual, started by the main exe or by COM | Manual is not off (see `levers.md`, Service Disable). Confirm the wake in a launch capture or the updater's log |
-| Wake tasks | Scheduled tasks that start the updater on a timer or at logon, some as SYSTEM | Non-elevated `Get-ScheduledTask` hides SYSTEM tasks; use `scripts/elevated_readonly.ps1` |
+| Wake tasks | Scheduled tasks that start the updater on a timer or at logon, some as SYSTEM | Non-elevated `Get-ScheduledTask` hides SYSTEM tasks; use `scripts/elevated_readonly.ps1`. They live in vendor subfolders such as `\<Vendor>UpdaterSystem\<Vendor>Updater\`, not in the root |
+| Older updater service versions | Earlier versions of the updater service left installed next to the current one | One may be protected by a security suite, so its config change is denied per item (`safety.md`, Antivirus) |
 | Exe swap on launch | A staged `new_<app>.exe` is renamed over `<app>.exe` when the app starts | The fingerprint changes during P1 without any installer running |
 | Old version folder cleanup | The previous `<version>\` folder is deleted on the next start | Any action targeting a fixed version path drifts; resolve by name |
 | Installer or repair re-run | Full installer from the vendor CDN | Rewrites services, tasks and shortcuts |
@@ -42,8 +43,8 @@ Desktop apps that ship a whole Chromium browser under their own brand and hang o
 
 Use:
 1. Vendor settings for default browser nag, autostart, background mode, context menu, side panels, via `json-set` while closed.
-2. Updater services: Disabled (not Manual), with recovery actions cleared; journal the originals.
-3. Wake tasks: disable, matched by action path pattern, re-scanned each run.
+2. Updater services: Disabled (not Manual), with recovery actions cleared; journal the originals. If a security suite denies the change for one service, record it as `knownFailure` with the evidence and fall back to its wake tasks and a firewall rule on its exe (`levers.md`, Service Disable); never work around the suite.
+3. Wake tasks: disable, matched by action path pattern, re-scanned each run. Give the `task-disable` action a `taskPath` for the vendor folder (matched recursively) plus the name pattern; a bare name pattern searches only the root folder and finds nothing.
 4. Updater exes and the staged `new_<app>.exe` name: placeholder or IFEO on vendor-unique names (normal tier), re-asserted by `-Install`.
 5. Shell extension block for the context menu CLSIDs, suffixed forms included.
 
@@ -62,7 +63,7 @@ Security-update cost: blocking the updater freezes the Chromium version, so the 
 ## Verification Probes
 
 1. Browser starts, opens a page, keeps bookmarks and the logged-in state after restart.
-2. The settings changed by `json-set` read back as written after a full restart.
+2. The settings changed by `json-set` read back as written after a full restart. A "restore pages?" bubble after a forced stop is expected (`pipeline-field-notes.md`).
 3. Launch capture: no updater service changes to Running, no `new_<app>.exe` appears, the fingerprint is unchanged after restart and after reboot.
 4. No popup window for 10 minutes idle and after a fresh start (enumerate the app's top-level windows; `scripts/shot_windows.ps1`).
 5. Context menu entries gone in Explorer after an Explorer restart.

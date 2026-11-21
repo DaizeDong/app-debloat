@@ -1,0 +1,42 @@
+# Pipeline: Field Notes for P5 to P7
+
+Lessons from the first live apply, verify and install runs, organized by stage. They extend `pipeline-apply.md` (the stage steps and exit criteria) and do not replace it. Examples are synthetic (`ExampleApp` by `AcmeCorp`).
+
+## P5 Build: Known Failures
+
+A failure that is understood and accepted is recorded, never ignored. Typical cases: a security suite vetoes one service change (`safety.md`, Antivirus), or a service is driver-protected.
+
+- Give the manifest action a `knownFailure {reason, ref}` field. `reason` is one sentence a reader of `auto.log` understands; `ref` is the ledger ID that holds the evidence (the error text, the service's permission list and protection level, loaded minifilters, installed AV).
+- Each run then logs that item as WARN with the reason instead of counting it as a failure, so a new failure still shows as one and the run history can be clean.
+- Close the path with another lever and list both in `plan.md` (for example `A-07` service disable with `knownFailure`, then `A-08` task disable and `A-09` firewall rule for the same updater).
+- Never set `knownFailure` to silence a failure nobody has explained. Without a ledger entry it is not known.
+
+```json
+{ "id": "A-07", "type": "service-disable", "target": ["AcmeUpdateSvc"],
+  "knownFailure": { "reason": "security suite denies service config changes for this service", "ref": "L-RI-012" } }
+```
+
+**Processes the loaded-module check cannot inspect.** Before a placeholder on a DLL, the engine checks that no process has it loaded. Some processes cannot load app code and cannot be opened either: VBS trustlets such as `LsaIso.exe` and `NgcIso.exe` (OpenProcess error 998) and VM memory processes such as `vmmem*` (error 5). If they defer an action every time, name them with the manifest field `checkLoadedExempt` or the engine switch `-IgnoreUninspectable <process names>`. The run prints the skipped processes and journals the choice. Record each name with its error code in the ledger. Never exempt a process that could host the app's code (Explorer, a browser, any process whose image is under a resolved root, any process that failed for a reason other than isolation).
+
+## P6 Verify
+
+**Connection burst or retry loop.** One socket count right after start cannot tell them apart; a client may open about 50 sockets in its first half minute and settle. Take 3 or more counts over at least 2 minutes and compare each with the before snapshot taken at the same time after start. A burst decays; a retry loop stays flat or grows, and repeats the same remote at a fixed interval. Count like for like: the same tool and the same filter for both sides (for example `Get-NetTCPConnection -OwningProcess <pid>`, established only). Different tools count differently, so never compare an inventory figure with a live filtered count.
+
+**Restore-pages bubble.** After `stop_app.ps1` forced a Chromium-based app closed, its next start may show a small "restore pages?" bubble (well under about 700x400). It is a side effect of the forced close, not a new popup. Note it in `verification.md` next to the screenshot, and judge popups from a start that followed a normal close.
+
+**32-bit modules.** `Get-Process` from 64-bit PowerShell lists only the exe for a WOW64 process. Use `scripts/list_modules.ps1 -Pid <pid>` or `-ImagePathRegex <regex>`: it walks Toolhelp32 including 32-bit modules and changes nothing. Use it to prove a blocked DLL is no longer loaded and a kept one still is.
+
+**Planned removals are not drift.** Run `snapshot_diff.py <before> <after> --journal <journal.jsonl>` (or `--expect-removed <file>` with one planned path per line) so files the apply removed or replaced on purpose are marked expected. Only unexplained changes keep the "binary fingerprint changed" warning, and those still mean P1 to P3 must be re-run. Two other kinds of noise: a path that differs only in letter case is the same Windows path, and the agent's own shells can show up because their command lines contain the app name; tag those as self, not as app processes.
+
+**The app's own log.** Many clients keep a diagnostic log (for example JSON lines with a `level` field). Compare its error and warning lines in the same window after start, before and after apply. It is often the best evidence that the blocked parts cause no errors in the core workflow. Summarize the relevant lines in `verification.md`; do not copy the log into DATA.
+
+**Core functions that need input.** Under a no-input rule a lookup, OCR, document translation or an upload cannot be exercised. Do not mark them passed. Move them to the owner's after-reboot list in `verification.md` with exact steps and the pass condition. Typing is allowed only into a window the agent itself opened (`safety.md`, Keystrokes).
+
+**Scratch.** Transcripts and small captures go to the run's scratch folder in the private companion. Delete scratch files over 50 MB once their findings are in the ledger (`safety.md`, Public Versus Private Data).
+
+## P7 Keep Applied
+
+- Run `-Install` only after a clean `-Apply`: P6 passed, and a second `-Apply` reports only SKIP plus WARN lines from `knownFailure` items. An apply that exits non-zero for any other reason must be fixed first.
+- Check the exit code of `-Install` itself. If its apply step failed, the watch task may already be registered; fix the failure, or run `-Uninstall` and start again.
+- Start the first watched run by hand rather than waiting for logon: `Start-ScheduledTask -TaskName <Prefix>Debloat-Watch`, then confirm a new line in `history.log` in the state dir and `(Get-ScheduledTaskInfo -TaskName <Prefix>Debloat-Watch).LastTaskResult` equal to 0.
+- Owner choices that were tried as options become defaults only after the owner ran the core test (for a drive: a real upload and download) and one reboot (`plan-template.md`, Rules That Apply to Every Section).

@@ -13,6 +13,12 @@
                               processes, all-user BITS jobs, WMI subscriptions)
     tasks\*.xml, tasks.json   Export-ScheduledTask for every task whose actions reference a root
                               or whose path or name matches -App
+    task-states.json          state baseline of the same tasks, walked folder by folder through
+                              every task folder (hidden tasks included): enabled, state, last and
+                              next run, last result, author, registration date, and (when the
+                              TaskScheduler operational log is on) who registered, updated,
+                              deleted or disabled each one and when. A later apply compares
+                              against it to tell "already disabled before P0" from "changed since"
     services\<name>.txt       sc.exe qc, qfailure, qtriggerinfo and sdshow for every service
     services.json             whose binary is under a root or whose name matches -App
     modules.json              Toolhelp32 module list (TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32)
@@ -159,6 +165,70 @@ try {
     $bundle.steps['tasks'] = [ordered]@{ file = 'tasks.json'; count = $taskIdx.Count }
 } catch { Add-Fail 'tasks' '(all)' $_.Exception.Message }
 
+# ---------------------------------------------------------------- 2b. task state baseline (every folder, recursive)
+# The state each matching task had at P0, so a later apply can tell "already disabled before P0" from "changed
+# since". Walks the Task Scheduler COM tree folder by folder (hidden tasks included), independent of step 2.
+try {
+    $svc = New-Object -ComObject Schedule.Service; $svc.Connect()
+    $stateRows = New-Object System.Collections.Generic.List[object]
+    $folders = 0; $seenTasks = 0
+    $stack = New-Object System.Collections.Generic.Stack[object]; $stack.Push($svc.GetFolder('\'))
+    while ($stack.Count) {
+        $f = $stack.Pop(); $folders++
+        try { foreach ($sf in @($f.GetFolders(0))) { if ($sf) { $stack.Push($sf) } } } catch { Add-Fail 'task_states' $f.Path $_.Exception.Message }
+        $tasks = @(); try { $tasks = @($f.GetTasks(1)) } catch { Add-Fail 'task_states' $f.Path $_.Exception.Message }   # 1 = TASK_ENUM_HIDDEN
+        foreach ($t in $tasks) {
+            if (-not $t) { continue }
+            $seenTasks++
+            $def = $null; try { $def = $t.Definition } catch { }
+            $why = $null; $acts = @()
+            if ($def) {
+                foreach ($a in @($def.Actions)) {
+                    if ($a.Type -eq 0) {   # TASK_ACTION_EXEC
+                        $acts += [ordered]@{ type = 'Exec'; execute = $a.Path; arguments = $a.Arguments; workdir = $a.WorkingDirectory }
+                        if (-not $why -and (Test-Refs "$($a.Path) $($a.Arguments) $($a.WorkingDirectory)")) { $why = 'root' }
+                    } elseif ($a.Type -eq 5) { $acts += [ordered]@{ type = 'ComHandler'; class_id = $a.ClassId; data = $a.Data } }
+                    else { $acts += [ordered]@{ type = "type$($a.Type)" } }
+                }
+            }
+            $folderPath = $f.Path; if (-not $folderPath.EndsWith('\')) { $folderPath += '\' }
+            $author = $null; $regDate = $null; $desc = $null
+            if ($def) { try { $author = $def.RegistrationInfo.Author; $regDate = $def.RegistrationInfo.Date; $desc = $def.RegistrationInfo.Description } catch { } }
+            if (-not $why -and $appRx -and $appRx.IsMatch("$($t.Path) $author $desc")) { $why = 'app' }
+            if (-not $why) { continue }
+            $lr = $null; try { $d = [datetime]$t.LastRunTime; if ($d.Year -gt 1999) { $lr = $d.ToString('o') } } catch { }
+            $nr = $null; try { $d = [datetime]$t.NextRunTime; if ($d.Year -gt 1999) { $nr = $d.ToString('o') } } catch { }
+            $stateName = @{ 0 = 'Unknown'; 1 = 'Disabled'; 2 = 'Queued'; 3 = 'Ready'; 4 = 'Running' }[[int]$t.State]
+            $stateRows.Add([ordered]@{
+                path = $folderPath; name = $t.Name; full_path = $t.Path; match = $why
+                enabled = [bool]$t.Enabled; state = $stateName; last_run = $lr; last_result = ('0x{0:x}' -f [int64]$t.LastTaskResult); next_run = $nr
+                author = $author; registered = $regDate; user = $(if ($def) { $def.Principal.UserId }); hidden = $(if ($def) { [bool]$def.Settings.Hidden })
+                actions = $acts; events = @()
+            })
+        }
+    }
+    # Who changed a task and when, if the Task Scheduler operational log is enabled (off by default):
+    # 106 registered, 140 updated, 141 deleted, 142 disabled.
+    $evNote = $null
+    if ($stateRows.Count) {
+        try {
+            $byPath = @{}; foreach ($r in $stateRows) { $byPath[$r.full_path.ToLowerInvariant()] = $r }
+            foreach ($ev in @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 106, 140, 141, 142; StartTime = (Get-Date).AddDays(-180) } -MaxEvents 5000 -ErrorAction Stop)) {
+                $tn = $null; $who = $null
+                try { $tn = [string]$ev.Properties[0].Value; $who = [string]$ev.Properties[1].Value } catch { }
+                if (-not $tn) { continue }
+                $r = $byPath[$tn.ToLowerInvariant()]; if (-not $r) { continue }
+                if ($r.events.Count -lt 20) { $r.events += [ordered]@{ id = $ev.Id; time = $ev.TimeCreated.ToUniversalTime().ToString('o'); user = $who } }
+            }
+        } catch { $evNote = "operational log not read: $($_.Exception.Message)" }
+    }
+    Save-Json 'task-states.json' ([ordered]@{ captured_at = $bundle.captured_at; folders = $folders; tasks_seen = $seenTasks
+        event_log = $(if ($evNote) { $evNote } else { 'read (events listed per task; empty when the log is disabled or rolled over)' })
+        tasks = $stateRows.ToArray() })
+    $bundle.steps['task_states'] = [ordered]@{ file = 'task-states.json'; count = $stateRows.Count; folders = $folders
+        disabled = @($stateRows | Where-Object { -not $_.enabled }).Count }
+} catch { Add-Fail 'task_states' '(all)' $_.Exception.Message }
+
 # ---------------------------------------------------------------- 3. services: qc, qfailure, qtriggerinfo, sdshow
 try {
     $svcIdx = New-Object System.Collections.Generic.List[object]
@@ -245,8 +315,9 @@ try {
 } catch { Add-Fail 'modules' '(all)' $_.Exception.Message }
 
 Save-Json 'bundle.json' $bundle
-Write-Host ("elevated bundle: tasks {0}, services {1}, processes {2}, failures {3}" -f `
+Write-Host ("elevated bundle: tasks {0} (state baseline {4}), services {1}, processes {2}, failures {3}" -f `
     $(if ($bundle.steps['tasks']) { $bundle.steps['tasks'].count } else { 'n/a' }),
     $(if ($bundle.steps['services']) { $bundle.steps['services'].count } else { 'n/a' }),
-    $(if ($bundle.steps['modules']) { $bundle.steps['modules'].processes } else { 'n/a' }), $bundle.failures.Count)
+    $(if ($bundle.steps['modules']) { $bundle.steps['modules'].processes } else { 'n/a' }), $bundle.failures.Count,
+    $(if ($bundle.steps['task_states']) { "$($bundle.steps['task_states'].count), $($bundle.steps['task_states'].disabled) disabled" } else { 'n/a' }))
 Write-Host "out: $outDir"

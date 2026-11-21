@@ -118,6 +118,21 @@
       ]
     },
     {
+      "id": "updater-system-tasks",
+      "type": "task-disable",
+      "category": "updater",
+      "rationale": [
+        "L-R6"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "taskPath": "\\FabrikamUpdaterSystem\\",
+      "target": [
+        "FabrikamUpdater*"
+      ]
+    },
+    {
       "id": "updater-svc",
       "type": "service-disable",
       "category": "updater",
@@ -130,7 +145,11 @@
       "target": [
         "FabrikamDriveUpdateSvc"
       ],
-      "stop": true
+      "stop": true,
+      "knownFailure": {
+        "reason": "a security suite vetoes the start-type change (access denied, protection level NONE)",
+        "ref": "L-R2"
+      }
     },
     {
       "id": "updater-config",

@@ -5,7 +5,7 @@
 # file inlined, so users download one file. Nothing here runs on load; Invoke-AppDebloat is the entry.
 # Reference: reference/manifest.md (schema, action types, journal, modes, exit codes).
 
-$script:AdEngineVersion = '1.2.0'
+$script:AdEngineVersion = '1.3.0'
 $script:AdEngineSource = $PSCommandPath
 $script:Ad = $null
 
@@ -415,6 +415,26 @@ function Get-AdRunningByPath([string[]]$paths) {
 }
 # Kernel-side minimal processes: they hold no user-mode modules, so a refused snapshot of them hides nothing.
 $script:AdMinimalProcs = @('System', 'Idle', 'Registry', 'Memory Compression', 'Secure System', 'vmmem', 'vmmemWSL')
+# Isolated security processes (VBS trustlets, refused with error 998) and VM memory processes (vmmem*, refused with
+# error 5): they run outside the normal user-mode loader and cannot load the app's DLLs.
+$script:AdIsolatedProcs = @('LsaIso', 'NgcIso')
+# Why an uninspectable process cannot hold the app's code, or $null. The image must be unknown or under System32,
+# so an app process that merely borrows one of these names is never exempted.
+function Get-AdExemptReason($p) {
+    $sys = Get-AdNormal (Join-Path $env:SystemRoot 'System32')
+    if ($p.Image -and -not (Test-AdUnder $p.Image $sys)) { return $null }
+    if ($script:AdIsolatedProcs -contains $p.Name) { return 'isolated security process (VBS trustlet)' }
+    if ($p.Name -like 'vmmem*') { return 'VM memory process' }
+    if ($p.Err -eq 998 -and $p.Image) { return 'isolated process under System32 (error 998)' }
+    $null
+}
+# Process-name patterns (from -IgnoreUninspectable and the manifest's checkLoadedExempt) that the loaded-module
+# check skips when they cannot be inspected. A process that can be inspected is always checked.
+function Test-AdIgnoredUninspectable($p) {
+    if (-not $script:Ad) { return $null }
+    foreach ($x in @($script:Ad.IgnoreUninspectable)) { if ($p.Name -like $x.Pattern) { return $x.Source } }
+    $null
+}
 # One record per running process: Name, Id, Session, Image, Modules (full paths, or $null when it could not be
 # inspected), Err, Protected. Cached per run; -Fresh takes a new snapshot (used right before a folder is replaced).
 function Get-AdModuleMap([switch]$Fresh) {
@@ -438,16 +458,23 @@ function Get-AdModuleMap([switch]$Fresh) {
 # written and on the real path of $dir). Returns @{ Hits; Unknown }. A process that could not be inspected goes to
 # Unknown, never to "not loaded", except kernel minimal processes and protected (PP/PPL) processes whose image lies
 # outside the install root: those load only DLLs signed for their protection level, never the app's own files.
-# Processes whose image is in $ExcludeImages are left out (they are stopped before the change).
+# Processes whose image is in $ExcludeImages are left out (they are stopped before the change). Exempt holds the
+# isolated and VM processes that were skipped, Ignored the uninspectable ones skipped by -IgnoreUninspectable or
+# checkLoadedExempt; Write-AdModuleExemptions prints both.
 function Get-AdLoadedUnder([string]$dir, [string[]]$ExcludeImages = @(), [switch]$Fresh) {
     $pre = @((Get-AdNormal $dir)); try { $r = Get-AdRealPath $dir; if ($pre -notcontains $r) { $pre += $r } } catch { }
     $root = if ($script:Ad) { $script:Ad.Root } else { $null }
     $hits = New-Object System.Collections.Generic.List[string]; $unknown = New-Object System.Collections.Generic.List[string]
+    $exempt = New-Object System.Collections.Generic.List[string]; $ignored = New-Object System.Collections.Generic.List[string]
     foreach ($p in (Get-AdModuleMap -Fresh:$Fresh)) {
         if ($p.Image -and @($ExcludeImages | Where-Object { $_ -ieq $p.Image }).Count) { continue }
         if ($null -eq $p.Modules) {
             if ($p.Session -eq 0 -and -not $p.Image -and $script:AdMinimalProcs -contains $p.Name) { continue }
             if ($p.Image -and $p.Protected -and -not ($root -and (Test-AdUnder $p.Image $root -OrEqual))) { continue }
+            $why = Get-AdExemptReason $p
+            if ($why) { $exempt.Add("$($p.Name) (PID $($p.Id), error $($p.Err): $why)"); continue }
+            $src = Test-AdIgnoredUninspectable $p
+            if ($src) { $ignored.Add("$($p.Name) (PID $($p.Id), error $($p.Err), by $src)"); continue }
             $unknown.Add("$($p.Name) (PID $($p.Id), error $($p.Err))"); continue
         }
         $short = $null
@@ -458,23 +485,62 @@ function Get-AdLoadedUnder([string]$dir, [string[]]$ExcludeImages = @(), [switch
             if ($real -and @($pre | Where-Object { Test-AdUnder $real $_ }).Count) { $hits.Add("$($p.Name) (PID $($p.Id)): $mp") }
         }
     }
-    @{ Hits = $hits; Unknown = $unknown }
+    @{ Hits = $hits; Unknown = $unknown; Exempt = $exempt; Ignored = $ignored }
+}
+# Prints which uninspectable processes the module check skipped, once per distinct line per run.
+function Write-AdModuleExemptions($lu) {
+    foreach ($pair in @(@('exempted (cannot load app code)', $lu.Exempt), @('skipped by choice (uninspectable)', $lu.Ignored))) {
+        if (-not @($pair[1]).Count) { continue }
+        $line = "loaded-module check $($pair[0]): $(@($pair[1]) -join '; ')"
+        if ($script:Ad.Shown.ContainsKey($line)) { continue }
+        $script:Ad.Shown[$line] = 1; Say 'INFO' $line
+    }
 }
 # The service, or $null only when the query succeeded and found none. A failed query throws.
 function Get-AdService([string]$name) {
     Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f ($name -replace "'", "''")) -ErrorAction Stop | Select-Object -First 1
 }
-# Scheduled tasks matching path and name (wildcards allowed); empty only when none exist. Other failures throw.
-function Get-AdTasks([string]$path, [string]$name) {
-    try { @(Get-ScheduledTask -TaskPath $path -TaskName $name -ErrorAction Stop) }
-    catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound' -or "$($_.FullyQualifiedErrorId)" -match 'NotFound') { @() } else { throw } }
+# Every scheduled task, from one enumeration: a per-name query reports a miss as an error record, which shows up in
+# transcripts and auto.log as a TerminatingError. Any error from the enumeration throws (a failed query is never
+# read as absence). Cached while the plan is built ($script:Ad.TaskCacheOn), never across a change.
+function Get-AdAllTasks {
+    if ($script:Ad -and $script:Ad.TaskCacheOn -and $null -ne $script:Ad.TaskCache) { return $script:Ad.TaskCache }
+    $ev = $null
+    $all = @(Get-ScheduledTask -ErrorAction SilentlyContinue -ErrorVariable ev)
+    if (@($ev).Count) { throw "scheduled task query failed: $(@($ev)[0].Exception.Message)" }
+    if ($script:Ad -and $script:Ad.TaskCacheOn) { $script:Ad.TaskCache = $all }
+    $all
+}
+# Scheduled tasks whose folder matches $path and whose name matches $name (wildcards, unless -Exact). -Recurse also
+# matches every subfolder of $path. Empty only when none exist.
+function Get-AdTasks([string]$path, [string]$name, [switch]$Recurse, [switch]$Exact) {
+    if ($Exact) { $path = [WildcardPattern]::Escape($path); $name = [WildcardPattern]::Escape($name) }
+    $pp = if ($Recurse) { "$path*" } else { $path }
+    @(Get-AdAllTasks | Where-Object { $_.TaskPath -like $pp -and $_.TaskName -like $name })
+}
+# A task folder as Get-ScheduledTask writes it: leading and trailing backslash.
+function Get-AdTaskFolder([string]$p) {
+    $p = $p.Trim(); if (-not $p.StartsWith('\')) { $p = '\' + $p }; if (-not $p.EndsWith('\')) { $p += '\' }; $p
+}
+# Why a recursive taskPath is too broad, or $null: it must start with at least three literal characters and must not
+# be able to reach the Windows task folders.
+function Get-AdTaskPathRefusal([string]$tp) {
+    $f = Get-AdTaskFolder $tp
+    if ($f -notmatch '^\\([^\\\*\?\[]+)') { return "taskPath '$tp' must start with a literal vendor folder name, not a wildcard" }
+    $head = $Matches[1]
+    if ($head.Length -lt 3) { return "taskPath '$tp' must start with at least three literal characters" }
+    if ('Microsoft' -like "$head*" -or $head -like 'Microsoft*') { return "taskPath '$tp' could reach \Microsoft\ (Windows tasks)" }
+    $null
 }
 function Get-AdTaskIdentity($t) {
     (@($t.Actions) | ForEach-Object { "$(AdGet $_ 'Execute')|$(AdGet $_ 'Arguments')|$(AdGet $_ 'ClassId')" }) -join ';'
 }
+# Firewall rules with this display name. A miss is not an error record (SilentlyContinue); any other error throws.
 function Get-AdFirewallRules([string]$displayName) {
-    try { @(Get-NetFirewallRule -DisplayName $displayName -ErrorAction Stop) }
-    catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { @() } else { throw } }
+    $ev = $null
+    $r = @(Get-NetFirewallRule -DisplayName $displayName -ErrorAction SilentlyContinue -ErrorVariable ev)
+    foreach ($e in @($ev)) { if ("$($e.CategoryInfo.Category)" -ne 'ObjectNotFound') { throw "firewall rule query failed: $($e.Exception.Message)" } }
+    $r
 }
 function Set-AdPlaceholder([string]$path, [ValidateSet('Directory', 'File')]$kind) {
     Assert-AdPathSafe $path
@@ -722,7 +788,10 @@ function Test-AdManifest($m) {
         foreach ($f in $need["$k"]) { if (-not (AdGet $s $f)) { $err.Add("version.sources '$k' entry needs '$f'") } }
     }
     $opts = @(AdGet $m 'options' @()); $optNames = @($opts | ForEach-Object { AdGet $_ 'name' })
-    foreach ($o in $optNames) { if ($o -notmatch '^[A-Z][A-Za-z0-9]{1,30}$' -or @('Apply', 'Install', 'Uninstall', 'Auto', 'InstallRoot', 'Force') -contains $o) { $err.Add("bad option name '$o'") } }
+    foreach ($o in $optNames) { if ($o -notmatch '^[A-Z][A-Za-z0-9]{1,30}$' -or @('Apply', 'Install', 'Uninstall', 'Auto', 'InstallRoot', 'Force', 'IgnoreUninspectable') -contains $o) { $err.Add("bad option name '$o'") } }
+    foreach ($x in @(AdGet $m 'checkLoadedExempt' @())) {
+        if ($x -isnot [string] -or $x -notmatch '^[\w\.\-\*\? ]+$' -or $x -notmatch '[\w]') { $err.Add("checkLoadedExempt entries are process names (wildcards allowed, not only wildcards): '$x'") }
+    }
     $ids = @{}
     foreach ($a in @(AdGet $m 'actions' @())) {
         $id = AdGet $a 'id'; $t = AdGet $a 'type'
@@ -745,6 +814,15 @@ function Test-AdManifest($m) {
             if (AdGet $a 'unless') { $err.Add("$id`: an $ev action is enabled only by 'when', not 'unless'") }
         }
         if ($t -eq 'hook' -and -not (AdGet $a 'hook')) { $err.Add("$id`: hook name missing") }
+        $kf = AdGet $a 'knownFailure'
+        if ($null -ne $kf -and (-not "$(AdGet $kf 'reason' '')".Trim() -or -not "$(AdGet $kf 'ref' '')".Trim())) { $err.Add("$id`: knownFailure needs 'reason' (why it fails) and 'ref' (ledger item or verification note)") }
+        if ($t -eq 'task-disable') {
+            $tp = AdGet $a 'taskPath'
+            if ($tp) {
+                $why = Get-AdTaskPathRefusal ([string]$tp); if ($why) { $err.Add("$id`: $why") }
+                foreach ($x in @(AdGet $a 'target' @())) { if ("$x" -match '\\') { $err.Add("$id`: with taskPath, target lists task name patterns without a folder: '$x'") } }
+            } elseif (-not @(AdGet $a 'target' @()).Count) { $err.Add("$id`: task-disable needs target (\Folder\Name*) or taskPath") }
+        }
         if ($t -eq 'ini-set' -or $t -eq 'json-set') {
             if (-not (AdGet $a 'path')) { $err.Add("$id`: $t needs 'path'") }
             if ($null -eq $a.PSObject.Properties['value']) { $err.Add("$id`: $t needs 'value'$(if ($t -eq 'ini-set') { ' (null removes the key)' })") }
@@ -967,6 +1045,7 @@ function Read-AdJournal {
             if (-not $ln.Trim()) { continue }
             $e = $ln | ConvertFrom-Json
             $k = [string](AdGet $e 'key')
+            if ((AdGet $e 'kind' 'change') -eq 'note') { continue }      # a recorded choice, nothing to undo
             if ((AdGet $e 'kind' 'change') -eq 'undone') { if ($active.Contains($k)) { $active.Remove($k) }; continue }
             if ($active.Contains($k)) {
                 $active[$k] | Add-Member -NotePropertyName after -NotePropertyValue (AdGet $e 'after') -Force
@@ -1029,10 +1108,23 @@ function Get-AdActionPlan($a) {
             }
         }
         'task-disable' {
-            foreach ($t in @(AdGet $a 'target' @())) {
-                $i = $t.LastIndexOf('\'); $tp = if ($i -ge 0) { $t.Substring(0, $i + 1) } else { '\' }; $tn = $t.Substring($i + 1)
-                $found = @(Get-AdTasks $tp $tn | Where-Object { $_.TaskName -notlike "$($script:Ad.Prefix)Debloat-*" })
-                if (-not $found) { Say 'SKIP' "task $t not present"; continue }
+            # target: '\Folder\Name*' (that folder only); or taskPath (a folder, matched with its subfolders) plus
+            # target name patterns (default '*'). Every search prints its match count, so a miss is visible.
+            $specs = @(); $tpr = AdGet $a 'taskPath'
+            if ($tpr) {
+                $why = Get-AdTaskPathRefusal ([string]$tpr); if ($why) { throw $why }
+                $tf = Get-AdTaskFolder ([string]$tpr); $names = @(AdGet $a 'target' @()); if (-not $names.Count) { $names = @('*') }
+                foreach ($n in $names) { $specs += , @($tf, [string]$n, $true) }
+            } else {
+                foreach ($t in @(AdGet $a 'target' @())) {
+                    $i = $t.LastIndexOf('\'); $tp = if ($i -ge 0) { $t.Substring(0, $i + 1) } else { '\' }
+                    $specs += , @((Get-AdTaskFolder $tp), $t.Substring($i + 1), $false)
+                }
+            }
+            foreach ($sp in $specs) {
+                $found = @(Get-AdTasks $sp[0] $sp[1] -Recurse:$sp[2] | Where-Object { $_.TaskName -notlike "$($script:Ad.Prefix)Debloat-*" -and $_.TaskPath -notlike '\Microsoft\*' })
+                $where = if ($sp[2]) { "$($sp[0]) and its subfolders" } else { "$($sp[0]) (this folder only; taskPath also searches subfolders)" }
+                Say 'INFO' ("$id`: searched $where for $($sp[1]): $($found.Count) match$(if ($found.Count -ne 1) { 'es' })" + $(if ($found.Count) { " ($((@($found | ForEach-Object { "$($_.TaskPath)$($_.TaskName)" }) | Select-Object -First 5) -join ', '))" } else { '' }))
                 foreach ($f in $found) {
                     if ("$($f.State)" -eq 'Disabled') { Say 'SKIP' "task $($f.TaskPath)$($f.TaskName) already disabled"; continue }
                     $ti = Get-AdTaskIdentity $f
@@ -1067,6 +1159,7 @@ function Get-AdActionPlan($a) {
                         # Loaded modules are matched by full path under this folder. Hosts named in stopHosts are left
                         # out here because they are stopped right before the change, where the check runs again.
                         $lu = Get-AdLoadedUnder $d -ExcludeImages $hosts
+                        Write-AdModuleExemptions $lu
                         if ($lu.Hits.Count) { Say 'WARN' "$d has modules loaded in running processes ($(@($lu.Hits | Select-Object -First 3) -join '; ')$(if ($lu.Hits.Count -gt 3) { "; +$($lu.Hits.Count - 3) more" })); deferred: close them (or add the host to stopHosts) or reboot, and run again"; continue }
                         if ($lu.Unknown.Count) {
                             if ($script:Ad.Mode -eq 'Plan' -and -not (Test-AdIsAdmin)) { $note = " [loaded-module check incomplete without elevation: $($lu.Unknown.Count) process(es) could not be inspected; -Apply checks again]" }
@@ -1220,7 +1313,7 @@ function Get-AdActionPlan($a) {
             $task = "$($script:Ad.Prefix)Debloat-Preboot-$id"
             $body = New-AdPrebootScript $task $jobs $false
             $scr = Join-Path $script:Ad.StateDir "preboot-$id.ps1"
-            if ((Test-Path -LiteralPath $scr) -and ([IO.File]::ReadAllText($scr) -eq $body) -and @(Get-AdTasks '\' $task).Count) {
+            if ((Test-Path -LiteralPath $scr) -and ([IO.File]::ReadAllText($scr) -eq $body) -and @(Get-AdTasks '\' $task -Exact).Count) {
                 Say 'SKIP' "$id`: edit already scheduled for next boot ($task)"; break
             }
             $items.Add((New-AdItem $a 'preboot' "preboot:$id" "Schedule pre-logon edit ($task): $((@($diffs) | Select-Object -Unique) -join ', ')" @{ task = $task; script = $scr; jobs = $jobs } @{ jobs = $orig } `
@@ -1332,9 +1425,16 @@ function Invoke-AdItem($it) {
         foreach ($h in @($d.stopHosts)) { if ($h) { Stop-AdProcessByPath $h } }
         if ($d.checkLoaded) {
             $lu = Get-AdLoadedUnder $d.path -Fresh
+            Write-AdModuleExemptions $lu
             if ($lu.Hits.Count -or $lu.Unknown.Count) {
                 $why = if ($lu.Hits.Count) { "modules are loaded ($(@($lu.Hits | Select-Object -First 3) -join '; '))" } else { "$($lu.Unknown.Count) process(es) could not be inspected ($(@($lu.Unknown | Select-Object -First 3) -join '; '))" }
                 Say 'WARN' "$($d.path) not replaced: $why; deferred: reboot and run again"; return 'warned'
+            }
+            # A choice to skip uninspectable processes is recorded next to the change it allowed.
+            if ($lu.Ignored.Count) {
+                Add-AdJournalLine ([ordered]@{ kind = 'note'; ts = (Get-Date -Format s); app = $script:Ad.AppId; actionId = $it.ActionId; key = $it.Key
+                                               note = 'loaded-module check skipped uninspectable processes'; skipped = @($lu.Ignored)
+                                               patterns = @(@($script:Ad.IgnoreUninspectable) | ForEach-Object { "$($_.Pattern) ($($_.Source))" }) })
             }
         }
     }
@@ -1410,7 +1510,11 @@ function Invoke-AdItem($it) {
             $b.Close()
             if (-not $done) {
                 $r = Invoke-AdNative reg.exe @('delete', "$($d.hive)\$($d.parent)\$($d.name)", '/f', "/reg:$($d.view)") -NoThrow
-                if ($r.Code) { Say 'WARN' "Cannot delete $($d.hive)\$($d.parent)\$($d.name) (likely owned by TrustedInstaller); left in place"; return 'warned' }
+                if ($r.Code) {
+                    Say 'WARN' "Cannot delete $($d.hive)\$($d.parent)\$($d.name) (likely owned by TrustedInstaller); left in place"
+                    if (-not $script:Ad.KnownFailures[$it.ActionId]) { Write-AdDenialDiagnostics $it }
+                    return 'warned'
+                }
             }
         }
         'firewall' { New-NetFirewallRule -DisplayName $d.name -Group $d.group -Direction $d.direction -Action Block -Program $d.program | Out-Null }
@@ -1444,7 +1548,7 @@ function Invoke-AdUndo($e) {
             Invoke-AdNative sc.exe @('config', $d.name, 'start=', $m) | Out-Null
         }
         'task' {
-            $t = @(Get-AdTasks $d.path $d.name) | Select-Object -First 1
+            $t = @(Get-AdTasks $d.path $d.name -Exact) | Select-Object -First 1
             if (-not $t) { return "GONE task $($d.path)$($d.name) no longer exists" }
             if ((Get-AdTaskIdentity $t) -ne (AdGet $af 'actions')) { return "CONFLICT task $($d.path)$($d.name) now runs '$(Get-AdTaskIdentity $t)', not the action it had when disabled; left as is" }
             if ("$($t.State)" -ne 'Disabled') { return "SKIP task $($d.path)$($d.name) is enabled already" }
@@ -1552,7 +1656,7 @@ function Invoke-AdUndo($e) {
             [IO.File]::WriteAllBytes($hosts, $enc.GetBytes(($lines -join $nl)))
         }
         'preboot' {
-            $t = @(Get-AdTasks '\' $d.task) | Select-Object -First 1
+            $t = @(Get-AdTasks '\' $d.task -Exact) | Select-Object -First 1
             if ($t) {
                 if ((Get-AdTaskIdentity $t) -ne (AdGet $af 'identity')) { return "CONFLICT task $($d.task) now runs '$(Get-AdTaskIdentity $t)'; left as is" }
                 Unregister-ScheduledTask -TaskName $d.task -Confirm:$false; return 'OK pending pre-logon edit cancelled'
@@ -1617,7 +1721,7 @@ function Invoke-AdUndo($e) {
             Write-AdTextFile $p $text $doc
         }
         'watchtask' {
-            $t = @(Get-AdTasks '\' $d.name) | Select-Object -First 1
+            $t = @(Get-AdTasks '\' $d.name -Exact) | Select-Object -First 1
             if (-not $t) { return "GONE task $($d.name) no longer exists" }
             if ((Get-AdTaskIdentity $t) -ne (AdGet $af 'identity')) { return "CONFLICT task $($d.name) now runs '$(Get-AdTaskIdentity $t)', not what -Install registered; left as is" }
             Unregister-ScheduledTask -TaskName $d.name -Confirm:$false
@@ -1629,6 +1733,72 @@ function Invoke-AdUndo($e) {
         }
         default { return "WARN unknown journal entry type '$($e.prim)': $($e.desc)" }
     }
+}
+
+# ------------------------------------------------------------------ access-denied diagnostics
+# True when an error record is an access denial (any language: HRESULT, Win32 code 5, exception type, category).
+function Test-AdAccessDenied($er) {
+    if ("$($er.CategoryInfo.Category)" -eq 'PermissionDenied') { return $true }
+    $ex = $er.Exception
+    while ($ex) {
+        if ($ex -is [UnauthorizedAccessException] -or $ex -is [Security.SecurityException]) { return $true }
+        if ($ex.HResult -eq -2147024891) { return $true }      # 0x80070005 E_ACCESSDENIED
+        $nc = $ex.PSObject.Properties['NativeErrorCode']; if ($nc -and "$($nc.Value)" -eq 'AccessDenied') { return $true }
+        if ($ex.Message -match '(?i)exit 5:|FAILED 5:|0x80070005|access (is )?denied|\u62D2\u7EDD\u8BBF\u95EE') { return $true }
+        $ex = $ex.InnerException
+    }
+    $false
+}
+function Write-AdDiagLines([string]$label, [scriptblock]$get) {
+    try { $out = @(& $get | ForEach-Object { "$_".TrimEnd() } | Where-Object { $_ }) } catch { $out = @("unavailable: $($_.Exception.Message)") }
+    if (-not $out.Count) { $out = @('(nothing reported)') }
+    Write-Host "  $label" -ForegroundColor Magenta
+    foreach ($l in $out) { Write-Host "      $l" }
+}
+# Read-only facts about a denied change: who protects the object and what on the machine can veto it. The denial
+# itself is never worked around (no ownership change, no ACL rewrite, no retry as another account).
+function Write-AdDenialDiagnostics($it) {
+    $d = $it.Data
+    Write-Host "  ---- access denied on $($it.Prim) change: diagnostics (read-only) ----" -ForegroundColor Magenta
+    switch ($it.Prim) {
+        'service' {
+            Write-AdDiagLines "service $($d.name) security descriptor (sc sdshow):" { Invoke-AdNative sc.exe @('sdshow', $d.name) }
+            Write-AdDiagLines "service $($d.name) protection level (sc qprotection):" { Invoke-AdNative sc.exe @('qprotection', $d.name) }
+        }
+        { @('regset', 'regdel', 'ifeo') -contains $_ } {
+            $sub = switch ($it.Prim) { 'regset' { $d.sub } 'regdel' { "$($d.parent)\$($d.name)" } 'ifeo' { "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$($d.name)" } }
+            $hv = if ($it.Prim -eq 'ifeo') { 'HKLM' } else { $d.hive }; $vw = if ($it.Prim -eq 'ifeo') { 64 } else { $d.view }
+            Write-AdDiagLines "registry key $hv\$sub owner and access:" {
+                $b = Open-AdHive $hv $vw
+                try {
+                    $k = $b.OpenSubKey($sub, [Microsoft.Win32.RegistryKeyPermissionCheck]::Default, [Security.AccessControl.RegistryRights]::ReadPermissions)
+                    if (-not $k) { 'key not present (the parent key decides)' }
+                    else { try { $sd = $k.GetAccessControl(); "owner: $($sd.Owner)"; "sddl: $($sd.Sddl)" } finally { $k.Close() } }
+                } finally { $b.Close() }
+            }
+        }
+        { @('file2dir', 'dir2file', 'acl', 'iniset', 'jsonset') -contains $_ } {
+            Write-AdDiagLines "file system object $($d.path):" {
+                if (-not (Test-Path -LiteralPath $d.path)) { 'not present' }
+                else { $acl = Get-Acl -LiteralPath $d.path; "owner: $($acl.Owner)"; "attributes: $((Get-Item -LiteralPath $d.path -Force).Attributes)"; "sddl: $($acl.Sddl)" }
+            }
+        }
+        'task' { Write-AdDiagLines "scheduled task $($d.path)$($d.name):" { $t = @(Get-AdTasks $d.path $d.name -Exact) | Select-Object -First 1; if ($t) { "state: $($t.State)"; "author: $($t.Author)"; "principal: $($t.Principal.UserId) ($($t.Principal.RunLevel))" } else { 'not present' } } }
+    }
+    # Machine-wide facts, once per run.
+    if (-not $script:Ad.Shown.ContainsKey('denial-machine')) {
+        $script:Ad.Shown['denial-machine'] = 1
+        if (Test-AdIsAdmin) { Write-AdDiagLines 'loaded file system minifilters (fltmc filters):' { Invoke-AdNative fltmc.exe @('filters') } }
+        else { Write-Host '  loaded file system minifilters: not listed (fltmc needs elevation)' -ForegroundColor Magenta }
+        Write-AdDiagLines 'installed antivirus (SecurityCenter2):' {
+            $ev = $null
+            $av = @(Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction SilentlyContinue -ErrorVariable ev)
+            if (@($ev).Count) { "unavailable: $(@($ev)[0].Exception.Message)" }
+            foreach ($x in $av) { "$($x.displayName) (productState 0x$('{0:X6}' -f [int]$x.productState), $($x.pathToSignedProductExe))" }
+        }
+    } else { Write-Host '  (minifilters and antivirus: listed above)' -ForegroundColor Magenta }
+    Write-Host '  A security suite can veto a change per item even when the permissions allow it. Do not work around it:' -ForegroundColor Magenta
+    Write-Host '  record it in the manifest as knownFailure {reason, ref} and use another lever (reference/levers.md).' -ForegroundColor Magenta
 }
 
 # ------------------------------------------------------------------ install / uninstall
@@ -1666,7 +1836,10 @@ function Invoke-AdUninstall {
         $close = [ordered]@{ kind = 'undone'; ts = (Get-Date -Format s); key = $e.key }
         if (-not (AdGet $e 'reversible' $true)) { Say 'INFO' "not reversible, left as is: $($e.desc)"; Add-AdJournalLine $close; continue }
         $bad = $null; $res = @()
-        try { $res = @(Invoke-AdUndo $e) } catch { $bad = "FAIL $($_.Exception.Message)"; Say 'FAIL' "undo $($e.desc) :: $($_.Exception.Message)" }
+        try { $res = @(Invoke-AdUndo $e) } catch {
+            $bad = "FAIL $($_.Exception.Message)"; Say 'FAIL' "undo $($e.desc) :: $($_.Exception.Message)"
+            if (Test-AdAccessDenied $_) { Write-AdDenialDiagnostics ([pscustomobject]@{ Prim = $e.prim; Data = $e.data; ActionId = $e.actionId }) }
+        }
         foreach ($x in $res) {
             $s = "$x"; if (-not $s) { continue }
             if ($s -like 'REINSTALL *') { $reinstall += $s.Substring(10) }
@@ -1711,19 +1884,29 @@ function Get-AdOptionGates($m, [string]$name) {
 }
 # Every option that was not passed, with the action ids it would switch on or off and their evidence, so an
 # option-gated action is never invisible in a plan.
+# Options that gate no action (an option left behind when its actions were removed) are listed apart as unused.
 function Write-AdOptionsNotSelected($m, [hashtable]$Options) {
-    $off = @(@(AdGet $m 'options' @()) | Where-Object { -not $Options[(AdGet $_ 'name')] })
-    if (-not $off.Count) { return }
-    Write-Host ''
-    Write-Host ("Options Not Selected: {0} (pass the switch to select it)" -f $off.Count)
-    foreach ($o in $off) {
+    $off = @(); $unused = @()
+    foreach ($o in @(AdGet $m 'options' @())) {
         $g = Get-AdOptionGates $m (AdGet $o 'name')
-        $parts = @()
-        if ($g.Enables.Count) { $parts += "enables $($g.Enables -join ', ')" }
-        if ($g.Skips.Count) { $parts += "skips $($g.Skips -join ', ')" }
-        if (-not $parts.Count) { $parts += 'gates no action' }
-        Write-Host ("  -{0}: {1}" -f (AdGet $o 'name'), ($parts -join '; ')) -ForegroundColor DarkCyan
-        $h = AdGet $o 'help' ''; if ($h) { Write-Host "      $h" -ForegroundColor DarkGray }
+        if (-not ($g.Enables.Count + $g.Skips.Count)) { $unused += $o } elseif (-not $Options[(AdGet $o 'name')]) { $off += $o }
+    }
+    if ($off.Count) {
+        Write-Host ''
+        Write-Host ("Options Not Selected: {0} (pass the switch to select it)" -f $off.Count)
+        foreach ($o in $off) {
+            $g = Get-AdOptionGates $m (AdGet $o 'name')
+            $parts = @()
+            if ($g.Enables.Count) { $parts += "enables $($g.Enables -join ', ')" }
+            if ($g.Skips.Count) { $parts += "skips $($g.Skips -join ', ')" }
+            Write-Host ("  -{0}: {1}" -f (AdGet $o 'name'), ($parts -join '; ')) -ForegroundColor DarkCyan
+            $h = AdGet $o 'help' ''; if ($h) { Write-Host "      $h" -ForegroundColor DarkGray }
+        }
+    }
+    if ($unused.Count) {
+        Write-Host ''
+        Write-Host ("Unused Options: {0} (no action in this manifest uses them; passing them changes nothing)" -f $unused.Count)
+        foreach ($o in $unused) { Write-Host ("  unused option -{0}{1}" -f (AdGet $o 'name'), $(if ($Options[(AdGet $o 'name')]) { ' (passed)' } else { '' })) -ForegroundColor DarkGray }
     }
 }
 
@@ -1733,14 +1916,22 @@ function Write-AdOptionsNotSelected($m, [hashtable]$Options) {
 # not elevated, invalid manifest, not installed, identity check failed, unsupported version).
 function Invoke-AppDebloat {
     param([Parameter(Mandatory)][string]$ManifestJson, [hashtable]$Hooks = @{}, [string]$Mode = 'Plan',
-          [hashtable]$Options = @{}, [string]$InstallRoot, [switch]$Force, [string]$ScriptPath)
+          [hashtable]$Options = @{}, [string]$InstallRoot, [switch]$Force, [string]$ScriptPath, [string[]]$IgnoreUninspectable = @())
     if (@('Plan', 'Apply', 'Install', 'Uninstall', 'Auto') -notcontains $Mode) { Write-Host "[FAIL] unknown mode '$Mode'. Nothing was changed." -ForegroundColor Red; return 2 }
     $m = $ManifestJson | ConvertFrom-Json
     $script:Ad = @{ Changes = 0; Failures = 0; Warnings = 0; Conflicts = 0; WarnLines = (New-Object System.Collections.Generic.List[string]); Hooks = $Hooks
                     Manifest = $m; Vars = @{}; Root = $null; Ver = $null; Uninstall = $null; KeepState = $false; Options = $Options
                     Bases = (New-Object System.Collections.Generic.List[string]); RealBases = @{}; CoreFiles = @(); PreserveFiles = @(); CoreProcs = @(); CoreSvcs = @(); Restartable = @()
-                    JournalKeys = @{}; Version = $null; AppId = 'unknown'; StateDir = $null; Mode = $Mode; ModMap = $null }
+                    JournalKeys = @{}; Version = $null; AppId = 'unknown'; StateDir = $null; Mode = $Mode; ModMap = $null
+                    Shown = @{}; IgnoreUninspectable = @(); KnownFailures = @{}; KnownFailed = 0; TaskCacheOn = $false; TaskCache = $null }
     try { Test-AdManifest $m } catch { Say 'FAIL' $_.Exception.Message; return 2 }
+    foreach ($x in @($IgnoreUninspectable | Where-Object { "$_".Trim() })) {
+        $x = "$x".Trim() -replace '(?i)\.exe$', ''
+        if ($x -notmatch '^[\w\.\-\*\? ]+$' -or $x -notmatch '[\w]') { Say 'FAIL' "-IgnoreUninspectable takes process names (wildcards allowed, not only wildcards): '$x'. Nothing was changed."; return 2 }
+        $Ad.IgnoreUninspectable += [pscustomobject]@{ Pattern = $x; Source = '-IgnoreUninspectable' }
+    }
+    foreach ($x in @(AdGet $m 'checkLoadedExempt' @())) { $Ad.IgnoreUninspectable += [pscustomobject]@{ Pattern = ("$x".Trim() -replace '(?i)\.exe$', ''); Source = 'manifest checkLoadedExempt' } }
+    foreach ($a in @(AdGet $m 'actions' @())) { $kf = AdGet $a 'knownFailure'; if ($kf) { $Ad.KnownFailures[(AdGet $a 'id')] = $kf } }
     $Ad.AppId = $m.id; $Ad.Name = $m.name; $Ad.Prefix = $m.taskPrefix
     $Ad.StateDir = Join-Path $env:ProgramData "AppDebloat\$($m.id)"
     $Ad.JournalPath = Join-Path $Ad.StateDir 'journal.jsonl'
@@ -1807,6 +1998,7 @@ function Invoke-AppDebloat {
     Write-Host ("Version       : {0}{1}" -f $(if ($Ad.Version) { $Ad.Version } else { 'unknown' }), $(if ($supported) { '' } else { "  (NOT SUPPORTED; supported: $supText)" }))
     Write-Host ("Mode          : {0}" -f $(if ($Mode -eq 'Plan') { 'dry run (add -Apply to change things)' } elseif ($Mode -eq 'Auto') { 'AUTO (blocking actions only)' } else { $Mode.ToUpper() }))
     $on = @($Options.Keys | Where-Object { $Options[$_] }); if ($on) { Write-Host "Options       : $($on -join ', ')" }
+    if (@($Ad.IgnoreUninspectable).Count) { Write-Host "Module check  : skips these processes when they cannot be inspected: $((@($Ad.IgnoreUninspectable) | ForEach-Object { "$($_.Pattern) ($($_.Source))" }) -join ', '); journaled with each change it allows" }
     if (-not $Ad.Version) { Say 'WARN' 'No version.sources entry returned a version, so -Apply/-Install/-Auto will refuse. Check the manifest sources against the installed files before going further.' }
     Write-Host ''
     if (-not $supported) {
@@ -1826,30 +2018,21 @@ function Invoke-AppDebloat {
     if ($Mode -eq 'Auto' -and $prevFp -and $prevFp -ne $fingerprint) { Say 'WARN' "version fingerprint changed $prevFp -> ${fingerprint}: only blocking actions are re-applied; re-run inventory (P1 to P3)" }
 
     $Ad.JournalKeys = @{}; foreach ($e in @(Read-AdJournal)) { $Ad.JournalKeys[$e.key] = Get-AdAfterKey (AdGet $e 'after') }
+    $wkey = "watchtask:$($Ad.WatchTask)"
     if ($Mode -eq 'Install') {
+        # Checked before anything changes; the task itself is registered only after a clean apply (see below).
         if (-not $ScriptPath) { Say 'FAIL' '-Install needs the script path'; return 2 }
-        $wkey = "watchtask:$($Ad.WatchTask)"
-        if (@(Get-AdTasks '\' $Ad.WatchTask).Count -and -not $Ad.JournalKeys.ContainsKey($wkey)) {
+        if (@(Get-AdTasks '\' $Ad.WatchTask -Exact).Count -and -not $Ad.JournalKeys.ContainsKey($wkey)) {
             Say 'FAIL' "a scheduled task named $($Ad.WatchTask) exists that this tool did not register; not replacing it. Nothing was changed."; return 2
         }
-        Protect-AdStateDir
-        $installed = Join-Path $Ad.StateDir "$($m.taskPrefix)Debloat.ps1"
-        if ($ScriptPath -ne $installed) { Copy-Item -LiteralPath $ScriptPath -Destination $installed -Force }
-        $opt = [ordered]@{}; foreach ($o in @(AdGet $m 'options' @())) { $opt[$o.name] = [bool]$Options[$o.name] }
-        [IO.File]::WriteAllText($optFile, ($opt | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
-        $wi = [pscustomobject]@{ ActionId = 'install'; ActionType = 'watch-task'; Prim = 'watchtask'; Key = $wkey; Desc = "Scheduled task $($Ad.WatchTask)"
-                                 Reversible = $true; Evidence = 'observed'; Data = @{ name = $Ad.WatchTask }; Original = @{ existed = $false }
-                                 After = [ordered]@{ identity = (Get-AdWatchIdentity $installed) } }
-        Write-AdJournal $wi
-        Register-AdWatchTask $installed
-        Say 'OK' "Installed to $installed and registered task $($Ad.WatchTask) (logon + every 6 h)"
-        Write-Host ''
     }
 
     # Plan: every active action is resolved to concrete items first; the same list is printed and then executed.
     # An action backed only by inferred or hypothesis evidence is inactive unless its 'when' option is given.
     $items = New-Object System.Collections.Generic.List[object]
     $inactive = New-Object System.Collections.Generic.List[string]
+    $known = New-Object System.Collections.Generic.List[object]
+    $Ad.TaskCacheOn = $true; $Ad.TaskCache = $null
     foreach ($a in @(AdGet $m 'actions' @())) {
         $w = AdGet $a 'when'; $u = AdGet $a 'unless'; $ev = AdGet $a 'evidence'
         if ($Mode -eq 'Auto' -and -not (AdGet $a 'reapply' $false)) { continue }
@@ -1860,9 +2043,14 @@ function Invoke-AppDebloat {
         }
         if ($w -and -not $Options[$w]) { continue }
         if ($u -and $Options[$u]) { continue }
+        $kf = $Ad.KnownFailures[(AdGet $a 'id')]; if ($kf) { $known.Add($a) }
         try { foreach ($it in (Get-AdActionPlan $a)) { $items.Add($it) } }
-        catch { Say 'FAIL' "$(AdGet $a 'id'): $($_.Exception.Message)" }
+        catch {
+            if ($kf) { $Ad.KnownFailed++; Say 'WARN' "[$(AdGet $a 'id')] known failure (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason') :: $($_.Exception.Message)" }
+            else { Say 'FAIL' "$(AdGet $a 'id'): $($_.Exception.Message)" }
+        }
     }
+    $Ad.TaskCacheOn = $false; $Ad.TaskCache = $null
     Write-Host ''
     Write-Host ("Plan: {0} change(s)" -f $items.Count)
     $n = 0
@@ -1877,15 +2065,51 @@ function Invoke-AppDebloat {
         foreach ($x in $inactive) { Say 'INACTIVE' $x }
     }
     if ($Mode -ne 'Auto') { Write-AdOptionsNotSelected $m $Options }
+    # A recorded, explained failure is named on every run, so it is neither forgotten nor mistaken for a new one.
+    if ($known.Count) {
+        Write-Host ''
+        Write-Host ("Known Failures: {0} action(s) carry a recorded failure (logged as WARN, not counted as failures)" -f $known.Count)
+        foreach ($a in $known) { $kf = $Ad.KnownFailures[(AdGet $a 'id')]; Say 'WARN' "[$(AdGet $a 'id')] knownFailure (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason')" }
+    }
     Write-Host ''
     $apply = ($Mode -ne 'Plan')
     if ($apply -and $items.Count) {
         foreach ($it in $items) {
+            $kf = $Ad.KnownFailures[$it.ActionId]
             try {
                 $r = Invoke-AdItem $it
                 if (@($r) -contains 'warned') { continue }      # WARN-only steps are not changes
                 $Ad.Changes++; Say 'OK' $it.Desc
-            } catch { Say 'FAIL' "$($it.Desc) :: $($_.Exception.Message)" }
+                if ($kf) { Say 'INFO' "[$($it.ActionId)] has knownFailure (ref $(AdGet $kf 'ref')) but this item succeeded; remove knownFailure from the manifest once it stays fixed" }
+            } catch {
+                if ($kf) { $Ad.KnownFailed++; Say 'WARN' "[$($it.ActionId)] known failure (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason') :: $($it.Desc) :: $($_.Exception.Message)" }
+                else {
+                    Say 'FAIL' "$($it.Desc) :: $($_.Exception.Message)"
+                    if (Test-AdAccessDenied $_) { Write-AdDenialDiagnostics $it }
+                }
+            }
+        }
+    }
+    if ($Mode -eq 'Install') {
+        # The watch task re-applies this plan every 6 hours, so it is registered only after an apply without
+        # failures; failures recorded as knownFailure do not count.
+        Write-Host ''
+        if ($Ad.Failures) {
+            Write-Host "Watch task NOT registered: the apply above had $($Ad.Failures) failure(s). Fix them, or record a failure that is understood and cannot be fixed as knownFailure {reason, ref} on its action, rebuild the script and run -Install again." -ForegroundColor Red
+        } else {
+            Protect-AdStateDir
+            $installed = Join-Path $Ad.StateDir "$($m.taskPrefix)Debloat.ps1"
+            if ($ScriptPath -ne $installed) { Copy-Item -LiteralPath $ScriptPath -Destination $installed -Force }
+            $opt = [ordered]@{}; foreach ($o in @(AdGet $m 'options' @())) { $opt[$o.name] = [bool]$Options[$o.name] }
+            [IO.File]::WriteAllText($optFile, ($opt | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+            $wi = [pscustomobject]@{ ActionId = 'install'; ActionType = 'watch-task'; Prim = 'watchtask'; Key = $wkey; Desc = "Scheduled task $($Ad.WatchTask)"
+                                     Reversible = $true; Evidence = 'observed'; Data = @{ name = $Ad.WatchTask }; Original = @{ existed = $false }
+                                     After = [ordered]@{ identity = (Get-AdWatchIdentity $installed) } }
+            try {
+                Write-AdJournal $wi
+                Register-AdWatchTask $installed
+                Say 'OK' "Installed to $installed and registered task $($Ad.WatchTask) (logon + every 6 h)$(if ($Ad.KnownFailed) { "; $($Ad.KnownFailed) known failure(s) stay as WARN" })"
+            } catch { Say 'FAIL' "registering $($Ad.WatchTask) :: $($_.Exception.Message)" }
         }
     }
     if ($apply -and (Test-Path -LiteralPath $Ad.StateDir)) {
@@ -1893,12 +2117,12 @@ function Invoke-AppDebloat {
     }
     if ($Mode -eq 'Auto') {
         $warn = if ($Ad.WarnLines.Count) { ' WARN: ' + (($Ad.WarnLines | Select-Object -Unique) -join ' | ') } else { '' }
-        Write-AdHistory ("{0}: {1} change(s), {2} failure(s){3}" -f $fingerprint, $Ad.Changes, $Ad.Failures, $warn)
+        Write-AdHistory ("{0}: {1} change(s), {2} failure(s), {3} known failure(s){4}" -f $fingerprint, $Ad.Changes, $Ad.Failures, $Ad.KnownFailed, $warn)
         & $stopLog
     }
     if (-not $apply) { Write-Host "$($items.Count) change(s) planned. Run again with -Apply in an elevated PowerShell to execute exactly this plan." }
     else {
-        Write-Host "$($Ad.Changes) change(s) made, $($Ad.Warnings) warning(s), $($Ad.Failures) failure(s)."
+        Write-Host "$($Ad.Changes) change(s) made, $($Ad.Warnings) warning(s), $($Ad.Failures) failure(s), $($Ad.KnownFailed) known failure(s)."
         if (@($items | Where-Object { $_.Prim -eq 'preboot' })) { Write-Host 'Reboot: a pre-logon settings edit is scheduled.' }
     }
     if ($Ad.Failures) { return 1 }
@@ -1922,6 +2146,7 @@ function New-AppScript {
     foreach ($o in @(AdGet $m 'options' @())) {
         $optParams += "    [switch]`$$($o.name),"
         $g = Get-AdOptionGates $m $o.name
+        if (-not ($g.Enables.Count + $g.Skips.Count)) { Write-Host "[WARN] option -$($o.name) gates no action in this manifest (no 'when' or 'unless' names it); the script lists it as an unused option" -ForegroundColor Magenta }
         $h = AdGet $o 'help' ''
         if ($g.Enables.Count) { $h += " Enables: $($g.Enables -join ', ')." }
         if ($g.Skips.Count) { $h += " Skips: $($g.Skips -join ', ')." }

@@ -60,6 +60,8 @@ Set the vendor service start type to Disabled and clear its recovery actions if 
   - Driver-protected services may refuse reconfiguration; do not fight the driver, mark the app `out-of-process only` for that path.
   - Some services are core (hotkeys, EC, fan, display, input). Check the contract first.
   - Manual is not off. A service set to Manual (demand start) still runs whenever the app, its tasks or a COM activation start it; a snapshot showing `Manual, Stopped` proves nothing. Check updater logs or a Procmon capture of a launch, and use Disabled when the service must not run.
+  - COM wakes services too. A COM server registered with an AppID `LocalService` value (often an updater's elevation or "on demand" class) starts that service whenever any process activates the class, and `sc qtriggerinfo` lists start triggers (network, device, ETW). Record which wake each service has; Disabled stops all of them, a firewall rule stops only the traffic.
+  - A security suite may veto the change for one service: `ChangeServiceConfig` returns access denied although the service DACL and protection level (`sc qprotection`) allow it. Do not work around it. Record the evidence (error, `sc sdshow`, protection level, `fltmc` minifilters, installed AV), mark the action `knownFailure {reason, ref}` in the manifest so each run logs a WARN with the reason instead of a failure, and fall back to lever 5 for its wake tasks and lever 6 for its exe.
   - Check `sc qfailure` (elevated) for recovery actions that restart it.
 
 ## 5. Scheduled Task Disable
@@ -70,7 +72,9 @@ Disable (do not delete) vendor tasks that run updaters, telemetry or promotions.
 - Survives upgrade: no. Re-assert.
 - AV risk: low.
 - Reversible: re-enable.
-- Pitfalls: tasks are often recreated under a new name by the updater; match by action path pattern and re-scan each run.
+- Pitfalls:
+  - Tasks are often recreated under a new name by the updater; match by action path pattern and re-scan each run.
+  - Vendor tasks often sit in subfolders (for example `\<Vendor>UpdaterSystem\<Vendor>Updater\`), not in the root. A name pattern alone searches only the root folder; give the action a `taskPath` (folder, matched recursively) plus the name pattern. The dry run prints the searched path and the match count, so "0 matches" is visible as a miss, not a plain SKIP.
 
 ## 6. Firewall Rule per Program
 
@@ -82,6 +86,7 @@ Outbound block rule for a specific executable path.
 - Reversible: remove rules by the script's own display-name prefix.
 - Pitfalls:
   - No wildcard paths. One rule per resolved executable.
+  - Fallback when a service change is denied (security-suite veto, driver protection): an outbound rule for the service exe and for each exe it launches stops its downloads while the service still runs. Pair it with task disable for its wake tasks, and say in `plan.md` that the service itself still starts.
   - Traffic from a DLL belongs to the host process. You cannot block an in-process SDK or an IME DLL loaded into a browser without blocking the browser.
   - Blocking a helper that also downloads wanted content (dictionaries, skins) breaks that content. Make it opt-in.
 
@@ -137,4 +142,5 @@ Binary patching (`ret` a popup routine), injected bypass DLLs, signature-check b
 | Updater on a timer | Task disable plus placeholder | IFEO by name |
 | Shell or preview extension | Unregister plus Blocked | ACL deny on its install dir |
 | Network-only helper | Firewall per program | none |
+| Service change denied by a security suite | `knownFailure` on the service action | Task disable plus firewall per program |
 | Shared-memory settings | Preboot SYSTEM edit | none |

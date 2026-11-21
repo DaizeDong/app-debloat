@@ -7,7 +7,7 @@ Reverse-engineer one adware-ish Windows app and ship an idempotent, self-reapply
 [![No Binary Patching](https://img.shields.io/badge/Binary%20Patching-None-green?style=flat)](skills/app-debloat/reference/safety.md)
 [![Auto Re-Apply](https://img.shields.io/badge/App%20Updates-Auto%20Re--Apply-green?style=flat)](skills/app-debloat/reference/pipeline.md)
 [![Languages](https://img.shields.io/badge/Languages-EN%20%2F%20CN-blue?style=flat)](#languages)
-[![Roadmap](https://img.shields.io/badge/Roadmap-v0.1.3-purple?style=flat)](ROADMAP.md)
+[![Roadmap](https://img.shields.io/badge/Roadmap-v0.1.4-purple?style=flat)](ROADMAP.md)
 
 [English](README.md) | [中文版](README_CN.md)
 

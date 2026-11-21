@@ -10,6 +10,10 @@
   Changes nothing on the machine. Works without elevation; whatever it could not read is listed
   in "access_failures" and "notes" instead of being silently skipped.
   Every item carries a stable "key" so snapshot_diff.py can compare two snapshots.
+  The agent's own processes are left out of "processes": this run and its shells, command lines
+  that name this skill's scripts folder or an agent shell snapshot, and helper shells (bash,
+  powershell, cmd, python, node) that descend from the same agent session. Counts per reason are
+  in "self_excluded".
   The snapshot is real-run DATA: write it to the private companion, never into the tool repo.
 
 .PARAMETER App
@@ -73,7 +77,7 @@ param(
     [switch]$AutorunsAcceptEula,
     [string]$AutorunsPath
 )
-$ToolVersion = '1.1.0'
+$ToolVersion = '1.2.0'
 $ErrorActionPreference = 'Stop'
 $AppSource = $null
 if ($AppFile) {
@@ -167,6 +171,7 @@ $Snap = [ordered]@{
     coverage        = [ordered]@{}
     access_failures = New-Object System.Collections.Generic.List[object]
     notes           = New-Object System.Collections.Generic.List[string]
+    self_excluded   = [ordered]@{}
     items           = [ordered]@{}
 }
 if (-not $IsAdmin) {
@@ -727,25 +732,62 @@ Invoke-Section 'processes' {
             $self[[int]$c.ProcessId] = $true; $queue.Enqueue([int]$c.ProcessId)
         }
     }
+    # Ancestors that bind the agent session (its shells and the agent host), not desktop-wide hosts: a helper
+    # shell that descends from one of them is a sibling of this run, so it belongs to the agent as well.
+    $genericHostRx = '^(explorer|svchost|services|wininit|winlogon|userinit|sihost|smss|csrss|system|runtimebroker|taskhostw|windowsterminal|openconsole|conhost)\.exe$'
+    $anchors = @{}
     $cur = $byPid[[int]$PID]
     for ($i = 0; $cur -and $i -lt 16; $i++) {
         $par = $byPid[[int]$cur.ParentProcessId]
         if (-not $par -or $self.ContainsKey([int]$par.ProcessId)) { break }
         if ($par.CreationDate -and $cur.CreationDate -and $par.CreationDate -gt $cur.CreationDate) { break }   # reused PID
-        if (-not (Test-UnderRoot $par.ExecutablePath)) { $self[[int]$par.ProcessId] = $true }
+        if (-not (Test-UnderRoot $par.ExecutablePath)) {
+            $self[[int]$par.ProcessId] = $true
+            if ($par.Name -notmatch $genericHostRx) { $anchors[[int]$par.ProcessId] = $true }
+        }
         $cur = $par
+    }
+    function Test-SessionChild($p) {
+        $c = $p
+        for ($j = 0; $c -and $j -lt 16; $j++) {
+            $pp = $byPid[[int]$c.ParentProcessId]
+            if (-not $pp) { return $false }
+            if ($pp.CreationDate -and $c.CreationDate -and $pp.CreationDate -gt $c.CreationDate) { return $false }   # reused PID
+            if ($anchors.ContainsKey([int]$pp.ProcessId)) { return $true }
+            $c = $pp
+        }
+        $false
+    }
+    # Command lines naming this skill's scripts folder or an agent shell snapshot belong to the agent.
+    $selfCmdRx = @('[\\/]skills[\\/]+app-debloat[\\/]+scripts[\\/]', '[\\/]shell-snapshots[\\/]')
+    if ($PSScriptRoot) {
+        $sr = $PSScriptRoot.TrimEnd('\')
+        $selfCmdRx += [regex]::Escape($sr)
+        $selfCmdRx += [regex]::Escape($sr.Replace('\', '/'))
+        if ($sr -match '^([A-Za-z]):\\(.*)$') { $selfCmdRx += [regex]::Escape('/' + $Matches[1].ToLowerInvariant() + '/' + $Matches[2].Replace('\', '/')) }   # Git Bash form
+    }
+    $selfCmd = New-Object regex(($selfCmdRx -join '|'), 'IgnoreCase')
+    $selfReasons = [ordered]@{}
+    function Add-SelfSkip([string]$reason, $p) {
+        if (-not $selfReasons.Contains($reason)) { $selfReasons[$reason] = [ordered]@{ count = 0; names = @() } }
+        $selfReasons[$reason].count++
+        if ($selfReasons[$reason].names -notcontains $p.Name) { $selfReasons[$reason].names += $p.Name }
     }
     $skippedSelf = 0
     $helperRx = '^(powershell|pwsh|cmd|bash|sh|python[\d.]*|pythonw[\d.]*|py|node|wscript|cscript|conhost|wsl|wt|windowsterminal)\.exe$'
     foreach ($p in $all) {
         if (-not $p.ExecutablePath) { $noPath++ }
-        if ($self.ContainsKey([int]$p.ProcessId)) { $skippedSelf++; continue }
+        if ($self.ContainsKey([int]$p.ProcessId)) { $skippedSelf++; Add-SelfSkip 'this_run' $p; continue }
         $kind = $null
         if (Test-UnderRoot $p.ExecutablePath) { $kind = 'root' }
         if (-not $kind) { $kind = Get-RefKind $p.CommandLine }
         if (-not $kind -and -not $p.ExecutablePath -and $script:NameRx -and $script:NameRx.IsMatch('\' + $p.Name)) { $kind = 'name' }
         if (-not $kind) { continue }
-        if ($p.CommandLine -and $PSCommandPath -and $p.CommandLine.Contains($PSCommandPath)) { $skippedSelf++; continue }   # another inventory run
+        if ($p.CommandLine -and $PSCommandPath -and $p.CommandLine.Contains($PSCommandPath)) { $skippedSelf++; Add-SelfSkip 'inventory_run' $p; continue }   # another inventory run
+        if (-not (Test-UnderRoot $p.ExecutablePath)) {   # an app binary is never the agent's own
+            if ($p.CommandLine -and $selfCmd.IsMatch($p.CommandLine)) { $skippedSelf++; Add-SelfSkip 'skill_or_shell_snapshot' $p; continue }
+            if ($p.Name -match $helperRx -and $anchors.Count -and (Test-SessionChild $p)) { $skippedSelf++; Add-SelfSkip 'agent_session_shell' $p; continue }
+        }
         $script:AppPids[[int]$p.ProcessId] = $p
         $parent = $byPid[[int]$p.ParentProcessId]
         # A parent created after the child is a reused PID, not the real parent.
@@ -759,9 +801,12 @@ Invoke-Section 'processes' {
             session = $p.SessionId; threads = $p.ThreadCount; created = $(if ($p.CreationDate) { $p.CreationDate.ToUniversalTime().ToString('o') })
             machine = $(if ($p.ExecutablePath) { Get-PeMachine $p.ExecutablePath }); modules_from_roots = @(); windows = @()
             # A shell or script host outside the roots that matched only on its command line is usually an analyst helper.
-            helper_suspect = [bool]($kind -ne 'root' -and $p.Name -match $helperRx) })
+            helper_suspect = [bool](-not (Test-UnderRoot $p.ExecutablePath) -and $p.Name -match $helperRx) })
     }
-    if ($skippedSelf) { $Snap.notes.Add("processes: skipped $skippedSelf processes of this inventory run (its PowerShell, its children and the shells that launched it).") }
+    if ($skippedSelf) {
+        $Snap.self_excluded = $selfReasons
+        $Snap.notes.Add("processes: skipped $skippedSelf processes of the agent itself (this run, its children and launching shells; other inventory runs; command lines naming the skill's scripts folder or an agent shell snapshot; helper shells of the same agent session). Counts per reason: self_excluded.")
+    }
     if ($noPath) { $Snap.notes.Add("processes: $noPath of $($all.Count) processes hid their image path (other user, SYSTEM or protected).") }
 
     # Modules: toolhelp snapshot sees 32-bit modules of WOW64 processes too. Needs same user or elevation.

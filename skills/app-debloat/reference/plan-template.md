@@ -8,6 +8,8 @@ A plan has exactly five mandatory sections, in this order, each with the concret
 
 - **Status decides activation.** Each action copies the evidence status of the weakest ledger entry it relies on (`observed`, `anchored`, `inferred`, `hypothesis`). Only `observed` and `anchored` actions may be default actions. `inferred` and `hypothesis` actions ship inactive behind a named option (manifest `options[]` plus `when`), with the probe that would promote them. A hypothesis never becomes a default action, however plausible.
 - **Owner choice does not change evidence.** When the owner chooses to pass an option at apply (for example a blanket "block all updaters"), the plan lists that action as `owner choice: <Name>` and keeps its evidence status as it was. Owner consent turns an option on; it never promotes `inferred` to `observed`.
+- **Owner choices become defaults only after a real test.** An option the owner tried at apply is promoted to a default (manifest `default: true`, plan row changed from `owner choice` to `default`) only after the owner ran the core test it could break (for a drive: a real upload and download; for a translator: a lookup) and the machine rebooted once with it applied. Record both as `VER` entries; until then it stays an option. A promotion does not change the evidence status.
+- **Accepted failures are named.** An action that is denied for an explained reason (a security-suite veto, a protected service) carries `knownFailure {reason, ref}` in the manifest; the plan lists it with its fallback actions in section 3 and as a residual in section 5.
 - **No unproven promises.** Do not claim a component is "fully blocked", "never returns" or "gone" unless a ledger `VER` entry shows it after the relevant trigger. Without that, write what the action does and what is still unknown.
 - **Leaving something untouched is a valid result.** An evidence-backed decision not to act (core dependency, shared component, no safe lever, licensing risk) is recorded as a decision with its IDs, not as a gap.
 - **Narrowest control wins.** Prefer an app-owned switch over a per-app block, a per-binary block over a per-folder block, and anything over a machine-wide or shared change.
@@ -99,7 +101,8 @@ Must contain:
 
 - Five sections present, in order, none blank.
 - Every default action is `observed` or `anchored`; every other action sits behind a named option.
-- Every owner-choice action is marked as such with its original evidence status.
+- Every owner-choice action is marked as such with its original evidence status; any promoted to default has a core-test and a reboot `VER` entry.
+- Every `knownFailure` has a ledger reference and a fallback lever.
 - Section 5 states the security-update cost for every blocked updater of a browser engine or network-facing component.
 - Every `keep` and every untouched candidate has a reason and IDs.
 - Every return path in the ledger appears in the durability matrix.

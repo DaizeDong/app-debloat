@@ -25,9 +25,11 @@
   Execute the plan. Needs an elevated PowerShell.
 
 .PARAMETER Install
-  Apply now and keep it applied: copies this file and the chosen options to %ProgramData%\AppDebloat\@@APP_ID@@
-  (admin-only) and registers the task @@APP_PREFIX@@Debloat-Watch (at logon and every 6 hours), which re-confirms
-  only the blocking actions. Install only after the core-function checks passed.
+  Apply now and keep it applied. Runs the apply first; only when it had no failures (failures recorded as
+  knownFailure in the manifest are WARN and do not count) it copies this file and the chosen options to
+  %ProgramData%\AppDebloat\@@APP_ID@@ (admin-only) and registers the task @@APP_PREFIX@@Debloat-Watch (at logon and
+  every 6 hours), which re-confirms only the blocking actions. Otherwise it registers nothing, says why and exits 1.
+  Install only after the core-function checks passed.
 
 .PARAMETER Uninstall
   Undo the journal in reverse order: restores each original only if the current state is still what this script
@@ -47,6 +49,12 @@
 .PARAMETER Force
   Apply, install or auto-apply even when the installed version is not in the manifest's supported list.
 
+.PARAMETER IgnoreUninspectable
+  Process names (wildcards allowed, .exe optional) that the loaded-module check skips when they cannot be
+  inspected, for a deferral you have checked is safe. Processes that can be inspected are always checked. The
+  skipped processes are printed and journaled with each change they allowed. This run only: the watch task does
+  not get it; list such processes in the manifest's checkLoadedExempt instead.
+
 #@@OPTION_HELP@@
 
 .EXAMPLE
@@ -63,7 +71,8 @@ param(
     [switch]$Uninstall,
     [switch]$Auto,
     [string]$InstallRoot,
-    [switch]$Force
+    [switch]$Force,
+    [string[]]$IgnoreUninspectable = @()
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
@@ -88,5 +97,5 @@ $opts = @{}
 $optProp = ($ManifestJson | ConvertFrom-Json).PSObject.Properties['options']
 if ($optProp) { foreach ($o in @($optProp.Value)) { $opts[$o.name] = [bool](Get-Variable -Name $o.name -ValueOnly) } }
 $code = @(Invoke-AppDebloat -ManifestJson $ManifestJson -Hooks $Hooks -Mode $mode -Options $opts `
-    -InstallRoot $InstallRoot -Force:$Force -ScriptPath $PSCommandPath)[-1]
+    -InstallRoot $InstallRoot -Force:$Force -ScriptPath $PSCommandPath -IgnoreUninspectable $IgnoreUninspectable)[-1]
 exit $code

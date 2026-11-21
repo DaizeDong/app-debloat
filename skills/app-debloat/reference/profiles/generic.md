@@ -95,6 +95,8 @@ Notes from one run on a Youdao Dictionary desktop build; unverified for other ve
 - The AI helper lives in its own folder (`Application\Stable`) and is started by the main client.
 - The installer may rewrite the AppUserModelID of Start Menu and Desktop shortcuts, including other apps' shortcuts. That is a write outside its own roots (`pipeline.md` P3).
 - Ads and AI prompts are drawn in-process from server config; see the next section.
+- The client's own diagnostic log (Youdao: `Yodao\DeskDict\logs\diagnostic\diagnostic.log` under the per-user data dir, JSON lines with a `level` field) is the best P6 evidence that blocked parts cause no errors (`pipeline-field-notes.md`). Summarize it; do not copy it into DATA.
+- Lookup, OCR and document translation need typed input. Under a no-input rule they go to the owner's after-reboot list.
 
 ## Remote Config Popups
 

@@ -21,12 +21,35 @@ the files of that root are reported as "capped" instead of added/removed, becaus
 detail depends on the cap. Changed items (same key on both sides) are still reported.
 When a root's binary fingerprint changes, the changed, removed and added binaries of that root are
 listed under the warning. Exit code 0 always; the diff is evidence, not a verdict.
+
+Planned changes (after an apply):
+  --journal FILE         the engine's journal.jsonl. Active entries (not undone) mark as expected:
+                         files and folders replaced by a placeholder (file2dir, dir2file) and
+                         everything under them, the placeholders themselves, ACL changes on those
+                         paths, and the tasks, services, firewall rules and IFEO entries it wrote.
+  --expect-removed FILE  one planned path per line (# comments, %VAR% tokens and * ? globs allowed);
+                         the path and everything under it count as planned removals or placeholders.
+  Expected items move to "expected" in each category and are not counted as added/removed/changed.
+  The fingerprint warning fires only when a root has a binary change that no plan explains.
+
+Noise that is not reported:
+  - Windows paths (keys, path, parent_path, command_line and other path-like values) are compared
+    without regard to letter case.
+  - A field that exists only in the newer snapshot schema (absent from every item of that category
+    on the side taken with another inventory.ps1 version) is listed under schema_only_fields, not as
+    a change.
+  - Processes whose command line names this skill's scripts folder or an agent shell snapshot are
+    the agent's own and are dropped (self_excluded counts them); inventory.ps1 1.2.0 and later
+    already leaves them out.
 """
 import argparse
+import fnmatch
 import json
+import os
+import re
 import sys
 
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.2.0"
 
 GROUPS = {
     "persistence": ["installs", "services", "tasks", "run_keys", "other_autostart", "ifeo", "com", "shell_ext", "tsf",
@@ -48,6 +71,12 @@ VOLATILE = {
 }
 SET_FIELDS = {"modules_from_roots", "module_names_only", "sources", "open_with", "actions_on", "flags"}
 FILE_CATS = ("files", "config_files", "placeholders")
+# Fields holding Windows paths or command lines: compared without regard to case.
+PATH_FIELDS = {"path", "parent_path", "command_line", "root", "rel", "image", "target", "execute", "workdir",
+               "arguments", "install_location", "filter_full_path", "stub_path", "ime_file", "layout_file",
+               "program", "main_exe", "command", "value", "location", "uninstall_key", "container"}
+PATHLIKE = re.compile(r"^(?:[A-Za-z]:[\\/]|%[A-Za-z_][\w()]*%[\\/]|\\\\)")
+SELF_CMD = re.compile(r"[\\/]skills[\\/]+app-debloat[\\/]+scripts[\\/]|[\\/]shell-snapshots[\\/]", re.I)
 
 
 def load(path):
@@ -61,7 +90,7 @@ def load(path):
 def index(items):
     out = {}
     for it in items or []:
-        k = it.get("key") or json.dumps(it, sort_keys=True)
+        k = (it.get("key") or json.dumps(it, sort_keys=True)).lower()
         n, base = 1, k
         while k in out:
             n += 1
@@ -70,14 +99,34 @@ def index(items):
     return out
 
 
-def norm(field, v):
-    if field in SET_FIELDS and isinstance(v, list):
-        return sorted(json.dumps(x, sort_keys=True) if not isinstance(x, str) else x.lower() for x in v)
+def fold(v, pathish=False):
+    """Lower-case Windows paths (by field name or by shape), recursively."""
+    if isinstance(v, str):
+        return v.lower() if pathish or PATHLIKE.match(v) else v
+    if isinstance(v, list):
+        return [fold(x, pathish) for x in v]
+    if isinstance(v, dict):
+        return {k: fold(x, pathish or k in PATH_FIELDS) for k, x in v.items()}
     return v
 
 
-def changed_fields(cat, a, b):
-    skip = VOLATILE["*"] | VOLATILE.get(cat, set()) | {"key"}
+def norm(field, v):
+    if field in SET_FIELDS and isinstance(v, list):
+        return sorted(json.dumps(fold(x), sort_keys=True) if not isinstance(x, str) else x.lower() for x in v)
+    return fold(v, field in PATH_FIELDS)
+
+
+def schema_only(items_a, items_b, versions_differ):
+    """Fields present on one side only, across every item of the category: a schema change, not a data change."""
+    if not versions_differ or not items_a or not items_b:
+        return set(), set()
+    fa = set().union(*(set(x) for x in items_a))
+    fb = set().union(*(set(x) for x in items_b))
+    return fb - fa, fa - fb
+
+
+def changed_fields(cat, a, b, ignore=frozenset()):
+    skip = VOLATILE["*"] | VOLATILE.get(cat, set()) | {"key"} | set(ignore)
     out = {}
     for f in sorted(set(a) | set(b)):
         if f in skip:
@@ -86,6 +135,105 @@ def changed_fields(cat, a, b):
         if va != vb:
             out[f] = [a.get(f), b.get(f)]
     return out
+
+
+def canon(p):
+    """Comparable Windows path: %VAR% expanded, backslashes, lower case, no trailing separator."""
+    if not p:
+        return ""
+    s = os.path.expandvars(str(p).strip().strip('"')).replace("/", "\\")
+    return s.rstrip("\\").lower()
+
+
+class Plan:
+    """What an apply changed on purpose, from --journal and --expect-removed."""
+
+    def __init__(self):
+        self.paths, self.globs, self.acl = set(), [], set()
+        self.tasks, self.services, self.firewall, self.ifeo = set(), set(), set(), set()
+        self.sources = []
+
+    def add_path(self, p):
+        c = canon(p)
+        if c:
+            (self.globs.append(c) if ("*" in c or "?" in c) else self.paths.add(c))
+
+    def covers_path(self, p):
+        c = canon(p)
+        if not c:
+            return False
+        if any(c == e or c.startswith(e + "\\") for e in self.paths):
+            return True
+        return any(fnmatch.fnmatchcase(c, g) or fnmatch.fnmatchcase(c, g + "\\*") for g in self.globs)
+
+    def covers(self, cat, it, how):
+        if cat in FILE_CATS or cat == "pending_update":
+            if self.covers_path(it.get("path")):
+                return True
+            return how == "changed" and canon(it.get("path")) in self.acl
+        name = str(it.get("name") or "").lower()
+        if cat == "tasks":
+            return str(it.get("key") or "").lower() in self.tasks
+        if cat == "services":
+            return name in self.services
+        if cat == "firewall":
+            return name in self.firewall or str(it.get("id") or "").lower() in self.firewall
+        if cat == "ifeo":
+            return str(it.get("image") or "").lower() in self.ifeo
+        return False
+
+    def __bool__(self):
+        return bool(self.paths or self.globs or self.acl or self.tasks or self.services or self.firewall or self.ifeo)
+
+
+def load_journal(path, plan):
+    """Active journal entries (one per key, 'undone' closes a key), as the engine reads them."""
+    active = {}
+    with open(path, encoding="utf-8-sig") as fh:
+        for n, ln in enumerate(fh, 1):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                sys.exit(f"snapshot_diff: {path} line {n} is not JSON")
+            k = str(e.get("key"))
+            if e.get("kind", "change") == "undone":
+                active.pop(k, None)
+            else:
+                active.setdefault(k, e)
+    counts = {}
+    for k, e in active.items():
+        prim, d = e.get("prim"), e.get("data") or {}
+        if prim in ("file2dir", "dir2file"):
+            plan.add_path(d.get("path") or (k[3:] if k.startswith("fs:") else None))
+        elif prim == "acl":
+            if d.get("path"):
+                plan.acl.add(canon(d["path"]))
+        elif prim == "task":
+            plan.tasks.add(f"task|{d.get('path') or ''}{d.get('name') or ''}".lower())
+        elif prim == "service":
+            plan.services.add(str(d.get("name") or k[4:]).lower())
+        elif prim == "firewall":
+            plan.firewall.add(str(d.get("name") or k[3:]).lower())
+        elif prim == "ifeo":
+            plan.ifeo.add(str(d.get("name") or k[5:]).lower())
+        else:
+            continue
+        counts[prim] = counts.get(prim, 0) + 1
+    plan.sources.append({"journal": path, "entries": len(active), "used": counts})
+
+
+def load_expect(path, plan):
+    n = 0
+    with open(path, encoding="utf-8-sig") as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if ln and not ln.startswith("#"):
+                plan.add_path(ln)
+                n += 1
+    plan.sources.append({"expect_removed": path, "paths": n})
 
 
 def brief(cat, it):
@@ -137,27 +285,41 @@ def root_of(it):
 
 
 def binary_row(it):
-    return {"rel": it.get("rel") or it.get("path"), "sha256": it.get("sha256"),
+    return {"rel": it.get("rel") or it.get("path"), "path": it.get("path"), "sha256": it.get("sha256"),
             "file_version": it.get("file_version"), "signer": it.get("signer")}
 
 
-def fingerprint_changes(A, B, capped_roots):
-    fa, fb = A.get("fingerprints", {}), B.get("fingerprints", {})
+def fingerprint_changes(A, B, capped_roots, plan):
+    fa = {p.lower(): (p, v) for p, v in (A.get("fingerprints") or {}).items()}
+    fb = {p.lower(): (p, v) for p, v in (B.get("fingerprints") or {}).items()}
     files_a = index(A.get("items", {}).get("files"))
     files_b = index(B.get("items", {}).get("files"))
     out = []
-    for p in sorted(set(fa) & set(fb)):
-        if fa[p].get("sha256") == fb[p].get("sha256"):
+    for pl in sorted(set(fa) & set(fb)):
+        (p, va), (_, vb) = fa[pl], fb[pl]
+        if va.get("sha256") == vb.get("sha256"):
             continue
-        pl = p.lower()
         ia = {k: v for k, v in files_a.items() if root_of(v) == pl}
         ib = {k: v for k, v in files_b.items() if root_of(v) == pl}
-        changed = [{"rel": ib[k].get("rel"), "before": binary_row(ia[k]), "after": binary_row(ib[k])}
+        changed = [{"rel": ib[k].get("rel"), "path": ib[k].get("path"), "before": binary_row(ia[k]),
+                    "after": binary_row(ib[k])}
                    for k in sorted(set(ia) & set(ib)) if ia[k].get("sha256") != ib[k].get("sha256")]
-        out.append({"root": p, "before": fa[p], "after": fb[p], "capped": pl in capped_roots,
-                    "changed_files": changed,
-                    "removed_files": [binary_row(ia[k]) for k in sorted(set(ia) - set(ib))],
-                    "added_files": [binary_row(ib[k]) for k in sorted(set(ib) - set(ia))]})
+        removed = [binary_row(ia[k]) for k in sorted(set(ia) - set(ib))]
+        added = [binary_row(ib[k]) for k in sorted(set(ib) - set(ia))]
+        fc = {"root": p, "before": va, "after": vb, "capped": pl in capped_roots,
+              "changed_files": changed, "removed_files": removed, "added_files": added, "explained": False}
+        if plan:
+            planned = {t: [r for r in lst if plan.covers_path(r.get("path"))]
+                       for t, lst in (("changed", changed), ("removed", removed), ("added", added))}
+            fc["planned"] = {t: len(v) for t, v in planned.items()}
+            fc["planned_files"] = planned
+            fc["changed_files"] = [r for r in changed if not plan.covers_path(r.get("path"))]
+            fc["removed_files"] = [r for r in removed if not plan.covers_path(r.get("path"))]
+            fc["added_files"] = [r for r in added if not plan.covers_path(r.get("path"))]
+            # Explained only when every binary difference is planned and the lists are complete (not capped).
+            fc["explained"] = (not fc["capped"] and any(planned.values())
+                               and not (fc["changed_files"] or fc["removed_files"] or fc["added_files"]))
+        out.append(fc)
     return out
 
 
@@ -169,39 +331,57 @@ def main():
     ap.add_argument("--summary", action="store_true", help="print a readable summary to stdout (never mixed with JSON)")
     ap.add_argument("--category", action="append", help="limit to these categories")
     ap.add_argument("--max-lines", type=int, default=12, help="items listed per category in the text summary")
+    ap.add_argument("--journal", action="append", default=[], help="engine journal.jsonl: its changes are expected")
+    ap.add_argument("--expect-removed", action="append", default=[],
+                    help="text file, one planned path or glob per line: removals and placeholders there are expected")
     args = ap.parse_args()
     A, B = load(args.before), load(args.after)
+    plan = Plan()
+    for j in args.journal:
+        load_journal(j, plan)
+    for e in args.expect_removed:
+        load_expect(e, plan)
 
-    warnings = []
+    warnings, notes = [], []
+    versions_differ = A.get("tool_version") != B.get("tool_version")
     if A.get("host", {}).get("elevated") != B.get("host", {}).get("elevated"):
         warnings.append("Elevation differs between snapshots: some added/removed items may only be visibility changes.")
     if A.get("params", {}).get("app") != B.get("params", {}).get("app"):
         warnings.append("Snapshots were taken with different -App patterns.")
-    if A.get("tool_version") != B.get("tool_version"):
-        warnings.append(f"inventory.ps1 versions differ ({A.get('tool_version')} vs {B.get('tool_version')}).")
+    if versions_differ:
+        warnings.append(f"inventory.ps1 versions differ ({A.get('tool_version')} vs {B.get('tool_version')}); "
+                        "fields only one version writes are listed under schema_only_fields, not as changes.")
 
     ra = {r["path"].lower(): r for r in A.get("roots", [])}
     rb = {r["path"].lower(): r for r in B.get("roots", [])}
     inc_a, inc_b = incomplete_roots(A), incomplete_roots(B)
     capped_roots = set(inc_a) | set(inc_b)
-    fp_changes = fingerprint_changes(A, B, capped_roots)
-    if fp_changes:
+    fp_changes = fingerprint_changes(A, B, capped_roots, plan)
+    unexplained = [fc for fc in fp_changes if not fc["explained"]]
+    if unexplained:
         warnings.append("Binary fingerprint changed (update, repair or a self-swap at launch ran): re-run inventory, "
                         "launch-chain and reinstall analysis before trusting the old plan. Changed and removed "
-                        "binaries are listed per root.")
+                        "binaries that no plan explains are listed per root.")
+    for fc in fp_changes:
+        if fc["explained"]:
+            notes.append(f"Binary fingerprint of {fc['root']} changed only by planned changes "
+                         f"({sum(fc['planned'].values())} file(s)): expected.")
     if capped_roots:
         warnings.append("Some roots were capped (MaxFiles/MaxEntries); their files are reported as capped, not "
                         "added/removed: " + ", ".join(sorted(capped_roots)))
 
     cats = args.category or sorted(set(A.get("items", {})) | set(B.get("items", {})))
     result = {"schema": "app-debloat.snapshot-diff/1", "tool_version": TOOL_VERSION,
-              "before": {"file": args.before, "captured_at": A.get("captured_at"), "elevated": A.get("host", {}).get("elevated")},
-              "after": {"file": args.after, "captured_at": B.get("captured_at"), "elevated": B.get("host", {}).get("elevated")},
-              "warnings": warnings,
+              "before": {"file": args.before, "captured_at": A.get("captured_at"),
+                         "elevated": A.get("host", {}).get("elevated"), "tool_version": A.get("tool_version")},
+              "after": {"file": args.after, "captured_at": B.get("captured_at"),
+                        "elevated": B.get("host", {}).get("elevated"), "tool_version": B.get("tool_version")},
+              "warnings": warnings, "notes": notes, "plan": plan.sources,
               "roots": {"added": sorted(set(rb) - set(ra)), "removed": sorted(set(ra) - set(rb))},
               "fingerprint_changes": fp_changes,
               "capped_roots": {"before": inc_a, "after": inc_b},
               "access_failures": {"before": len(A.get("access_failures", [])), "after": len(B.get("access_failures", []))},
+              "schema_only_fields": {}, "self_excluded": {"before": 0, "after": 0},
               "categories": {}, "counts": {}}
 
     def depends_on_cap(cat, it):
@@ -210,8 +390,20 @@ def main():
         states = [x[r] for x in (inc_a, inc_b) if r in x]
         return any(v["entries_truncated"] or (cat == "files" and v["capped"]) for v in states)
 
+    def not_self(x):
+        return not SELF_CMD.search(str(x.get("command_line") or ""))
+
     for cat in cats:
-        ia, ib = index(A.get("items", {}).get(cat)), index(B.get("items", {}).get(cat))
+        la, lb = list(A.get("items", {}).get(cat) or []), list(B.get("items", {}).get(cat) or [])
+        if cat == "processes":
+            # The agent's own shells and helpers: their command lines name the app, but they are not the app.
+            ka, kb = [x for x in la if not_self(x)], [x for x in lb if not_self(x)]
+            result["self_excluded"] = {"before": len(la) - len(ka), "after": len(lb) - len(kb)}
+            la, lb = ka, kb
+        ia, ib = index(la), index(lb)
+        new_b, new_a = schema_only(la, lb, versions_differ)
+        if new_b or new_a:
+            result["schema_only_fields"][cat] = {"after_only": sorted(new_b), "before_only": sorted(new_a)}
         added = [ib[k] for k in sorted(set(ib) - set(ia))]
         removed = [ia[k] for k in sorted(set(ia) - set(ib))]
         capped = None
@@ -225,17 +417,31 @@ def main():
                           "added_suppressed": len(sup_add), "removed_suppressed": len(sup_rem)}
         changed = []
         for k in sorted(set(ia) & set(ib)):
-            ch = changed_fields(cat, ia[k], ib[k])
+            ch = changed_fields(cat, ia[k], ib[k], new_b | new_a)
             if ch:
                 changed.append({"key": k, "fields": ch, "item": ib[k]})
-        if added or removed or changed or capped:
+        expected = None
+        if plan:
+            exp = {"added": [it for it in added if plan.covers(cat, it, "added")],
+                   "removed": [it for it in removed if plan.covers(cat, it, "removed")],
+                   "changed": [c for c in changed if plan.covers(cat, c["item"], "changed")]}
+            if any(exp.values()):
+                expected = exp
+                added = [it for it in added if not plan.covers(cat, it, "added")]
+                removed = [it for it in removed if not plan.covers(cat, it, "removed")]
+                changed = [c for c in changed if not plan.covers(cat, c["item"], "changed")]
+        if added or removed or changed or capped or expected:
             result["categories"][cat] = {"added": added, "removed": removed, "changed": changed}
             if capped:
                 result["categories"][cat]["capped"] = capped
+            if expected:
+                result["categories"][cat]["expected"] = expected
         result["counts"][cat] = {"before": len(ia), "after": len(ib), "added": len(added), "removed": len(removed),
                                  "changed": len(changed)}
         if capped:
             result["counts"][cat]["capped"] = capped["added_suppressed"] + capped["removed_suppressed"]
+        if expected:
+            result["counts"][cat]["expected"] = sum(len(v) for v in expected.values())
 
     text = json.dumps(result, indent=1, ensure_ascii=False)
     if args.out:
@@ -252,12 +458,20 @@ def main():
 
     say = print
     say(f"snapshot diff: {A.get('captured_at')} -> {B.get('captured_at')}")
+    for src in plan.sources:
+        if "journal" in src:
+            used = ", ".join(f"{k} {v}" for k, v in sorted(src["used"].items())) or "none usable"
+            say(f"  plan: journal {src['journal']} ({src['entries']} active entries; {used})")
+        else:
+            say(f"  plan: expected removals {src['expect_removed']} ({src['paths']} paths)")
     for w in warnings:
         say(f"  WARNING: {w}")
         if not w.startswith("Binary fingerprint changed"):
             continue
-        for fc in fp_changes:
+        for fc in unexplained:
             note = " (capped: the removed and added lists may be incomplete)" if fc["capped"] else ""
+            if fc.get("planned") and any(fc["planned"].values()):
+                note += f" ({sum(fc['planned'].values())} planned change(s) not listed)"
             say(f"    root {fc['root']}{note}")
             for tag, lst in (("~", fc["changed_files"]), ("-", fc["removed_files"]), ("+", fc["added_files"])):
                 for n, row in enumerate(lst):
@@ -272,6 +486,15 @@ def main():
                             say(f"       ~ {row['rel']} sha256 {str(b.get('sha256'))[:12]} -> {str(a.get('sha256'))[:12]}")
                     else:
                         say(f"       {tag} {row['rel']} {row.get('file_version') or ''}".rstrip())
+    for n in notes:
+        say(f"  note: {n}")
+    for cat, f in result["schema_only_fields"].items():
+        parts = ([f"new {', '.join(f['after_only'])}"] if f["after_only"] else []) + \
+                ([f"dropped {', '.join(f['before_only'])}"] if f["before_only"] else [])
+        say(f"  schema: [{cat}] {'; '.join(parts)} (not compared)")
+    se = result["self_excluded"]
+    if se["before"] or se["after"]:
+        say(f"  self: dropped the agent's own processes (before {se['before']}, after {se['after']})")
     for k in ("added", "removed"):
         for p in result["roots"][k]:
             say(f"  root {k}: {p}")
@@ -288,6 +511,9 @@ def main():
             if cap:
                 head += (f"  capped: {cap['added_suppressed']} added and {cap['removed_suppressed']} removed not "
                          f"compared under {', '.join(cap['roots'])}")
+            exp = d.get("expected")
+            if exp:
+                head += f"  planned: +{len(exp['added'])} -{len(exp['removed'])} ~{len(exp['changed'])}"
             lines.append(head)
             shown = 0
             for tag, lst in (("+", d["added"]), ("-", d["removed"])):
@@ -305,6 +531,13 @@ def main():
             total = len(d["added"]) + len(d["removed"]) + len(d["changed"])
             if total > shown:
                 lines.append(f"     ... {total - shown} more in the JSON")
+            if exp:
+                rows = [("+", it) for it in exp["added"]] + [("-", it) for it in exp["removed"]] + \
+                       [("~", c["item"]) for c in exp["changed"]]
+                for tag, it in rows[:args.max_lines]:
+                    lines.append(f"     planned {tag} {brief(cat, it)}")
+                if len(rows) > args.max_lines:
+                    lines.append(f"     ... {len(rows) - args.max_lines} more planned in the JSON")
         say(f"{group}: {'no change' if not lines else ''}".rstrip())
         for ln in lines:
             say(ln)
