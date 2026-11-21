@@ -1,10 +1,10 @@
-# Neutralization levers
+# Neutralization Levers
 
 Pick the least-flagged lever that actually closes the path. Order below is least likely to be flagged by antivirus first. Every lever is journaled with its original state on first touch, and every lever has an undo.
 
 Columns used in each entry: Stops, Survives upgrade, AV risk, Reversible, Pitfalls.
 
-## 1. Config gate off
+## 1. Config Gate Off
 
 Turn the component off where the app itself decides to load it (component table, feature flag, ini, registry value).
 
@@ -19,8 +19,9 @@ Turn the component off where the app itself decides to load it (component table,
   - Shared-memory settings are flushed back over the file by any process holding them. Edit the file in a preboot SYSTEM task that runs before logon and deletes itself.
   - Some apps strip the read-only attribute before writing, so read-only alone protects nothing.
   - A "force enable" field may override the plain enable field; clear both.
+  - Plain INI and JSON settings files (`Preferences`, `Local State`, vendor ini) use the engine's `ini-set` and `json-set` action types with `onlyWhenNotRunning`, not a hand-written hook; list the file in `core.preserve`. Chromium Secure Preferences carry MACs: a value covered by a MAC is reset or flagged when edited, so prefer `Local State` or an unprotected key.
 
-## 2. Same-named placeholder
+## 2. Same-Named Placeholder
 
 Delete `x.exe` (or a DLL) and create an empty directory named `x.exe` at the same path. For a component directory, the inverse: delete the directory and create a read-only empty file with its name.
 
@@ -33,7 +34,7 @@ Delete `x.exe` (or a DLL) and create an empty directory named `x.exe` at the sam
   - Stop the owning process by PID first; a loaded DLL cannot be removed.
   - The parent must not be writable to the updater in a way that lets it remove the placeholder; if it is, add lever 3.
 
-## 3. File or directory ACL deny
+## 3. File or Directory ACL Deny
 
 Add a deny ACE (write data, append, write attributes, delete) for the identity that rewrites the target.
 
@@ -46,7 +47,7 @@ Add a deny ACE (write data, append, write attributes, delete) for the identity t
   - A deny for the user does nothing against a SYSTEM service writer. Disable the service (lever 4).
   - Deny ACEs on shared locations can break unrelated software. Keep them on app-owned paths only.
 
-## 4. Service disable
+## 4. Service Disable
 
 Set the vendor service start type to Disabled and clear its recovery actions if they restart it.
 
@@ -58,8 +59,10 @@ Set the vendor service start type to Disabled and clear its recovery actions if 
   - Never `sc delete` a vendor service. Disable it.
   - Driver-protected services may refuse reconfiguration; do not fight the driver, mark the app `out-of-process only` for that path.
   - Some services are core (hotkeys, EC, fan, display, input). Check the contract first.
+  - Manual is not off. A service set to Manual (demand start) still runs whenever the app, its tasks or a COM activation start it; a snapshot showing `Manual, Stopped` proves nothing. Check updater logs or a Procmon capture of a launch, and use Disabled when the service must not run.
+  - Check `sc qfailure` (elevated) for recovery actions that restart it.
 
-## 5. Scheduled task disable
+## 5. Scheduled Task Disable
 
 Disable (do not delete) vendor tasks that run updaters, telemetry or promotions.
 
@@ -69,7 +72,7 @@ Disable (do not delete) vendor tasks that run updaters, telemetry or promotions.
 - Reversible: re-enable.
 - Pitfalls: tasks are often recreated under a new name by the updater; match by action path pattern and re-scan each run.
 
-## 6. Firewall rule per program
+## 6. Firewall Rule per Program
 
 Outbound block rule for a specific executable path.
 
@@ -82,7 +85,7 @@ Outbound block rule for a specific executable path.
   - Traffic from a DLL belongs to the host process. You cannot block an in-process SDK or an IME DLL loaded into a browser without blocking the browser.
   - Blocking a helper that also downloads wanted content (dictionaries, skins) breaks that content. Make it opt-in.
 
-## 7. Shell extension block
+## 7. Shell Extension Block
 
 Add the extension CLSID under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked`, and unregister it.
 
@@ -94,8 +97,9 @@ Add the extension CLSID under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sh
   - Check both registry views (64-bit and WOW6432Node) and HKCU against HKLM.
   - Some referencing keys are owned by TrustedInstaller and cannot be removed without taking ownership; do not take ownership of system keys. A dangling reference to a deleted and blocked CLSID is harmless.
   - Restarting Explorer to unload the extension: restart it in a `finally` block.
+  - Vendors that offer their own toggle may disable a handler by appending `-` to the CLSID in the handler key. Match handlers with that suffix too, and check which view wins in the merged HKCR (an HKCU value overrides HKLM for that user).
 
-## 8. IFEO by image name
+## 8. IFEO by Image Name
 
 `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\<name.exe>` with `Debugger` set.
 
@@ -110,7 +114,7 @@ Add the extension CLSID under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sh
   - Does not stop `LoadLibrary`. DLLs still need placeholders.
   - Re-read after a delay and after reboot to catch silent AV removal.
 
-## 9. Hosts or DNS block
+## 9. Hosts or DNS Block
 
 - Stops: name resolution of vendor-specific hosts, including from in-process SDKs.
 - Survives upgrade: yes.
@@ -118,11 +122,11 @@ Add the extension CLSID under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sh
 - Reversible: remove lines between the script's markers.
 - Pitfalls: discouraged for shared vendor domains (one company's CDN or remote config shared by several of its apps). Prefer a router, DNS filter or proxy the owner already runs. Never touch Microsoft domains.
 
-## Last resort, not in public outputs
+## Last Resort, Not in Public Outputs
 
 Binary patching (`ret` a popup routine), injected bypass DLLs, signature-check bypass values. These pin to one build, break Authenticode (component loaders often verify signatures), carry ban and legal risk, and are excluded from public repos (see `safety.md`). If the gate is in-binary only and no lever above works, record it as a residual in the ledger.
 
-## Choosing quickly
+## Choosing Quickly
 
 | Goal | First choice | Add if needed |
 |---|---|---|

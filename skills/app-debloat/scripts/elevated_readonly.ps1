@@ -1,0 +1,252 @@
+﻿#Requires -Version 5.1
+<#
+.SYNOPSIS
+  One elevated, read-only evidence bundle for one app: elevated inventory, scheduled task XML
+  (SYSTEM tasks included), service config and failure actions, and module lists of the app's
+  processes (32-bit WOW64 modules included). Meant to run once, early, behind one UAC prompt.
+
+.DESCRIPTION
+  Refuses to run without elevation. Changes nothing: it only reads and writes files under -Out.
+
+  Writes into -Out:
+    inventory-elevated.json   scripts\inventory.ps1 run elevated (sees SYSTEM tasks, other-user
+                              processes, all-user BITS jobs, WMI subscriptions)
+    tasks\*.xml, tasks.json   Export-ScheduledTask for every task whose actions reference a root
+                              or whose path or name matches -App
+    services\<name>.txt       sc.exe qc, qfailure, qtriggerinfo and sdshow for every service
+    services.json             whose binary is under a root or whose name matches -App
+    modules.json              Toolhelp32 module list (TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32)
+                              for every running process whose image is under a root
+    bundle.json               what ran, counts and every failure
+
+  Roots are -Root plus the roots inventory.ps1 resolved. The bundle keeps literal paths (the
+  inventory still redacts its own); it is real-run DATA for the private companion only.
+
+  If the owner declines the UAC prompt, do not retry more than once: record the exact command
+  below in the run notes and continue without elevated evidence.
+
+.PARAMETER App
+  Regex for the app (ASCII preferred). Same meaning as inventory.ps1 -App.
+
+.PARAMETER AppFile
+  UTF-8 text file whose first non-empty line is the -App regex. Use it for non-ASCII names,
+  which Windows PowerShell 5.1 can mangle on the command line.
+
+.PARAMETER Root
+  One or more install directories.
+
+.PARAMETER Out
+  Output directory (required, created if missing).
+
+.PARAMETER NoInventory
+  Skip the inventory run (only tasks, services and modules).
+
+.PARAMETER NoSignature
+  Passed to inventory.ps1.
+
+.EXAMPLE
+  # in an elevated 64-bit Windows PowerShell:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\elevated_readonly.ps1 -App 'ExampleApp' `
+      -Root "$env:ProgramFiles\ExampleApp" -Out D:\private\exampleapp\elevated
+#>
+[CmdletBinding()]
+param(
+    [string]$App,
+    [string]$AppFile,
+    [string[]]$Root,
+    [Parameter(Mandatory = $true)][string]$Out,
+    [switch]$NoInventory,
+    [switch]$NoSignature
+)
+$ErrorActionPreference = 'Stop'
+
+$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $IsAdmin) {
+    $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    if ($App) { $argv += @('-App', "'$App'") }
+    if ($AppFile) { $argv += @('-AppFile', "`"$AppFile`"") }
+    foreach ($r in @($Root)) { if ($r) { $argv += @('-Root', "`"$r`"") } }
+    $argv += @('-Out', "`"$Out`"")
+    Write-Host 'Refused: elevated_readonly.ps1 must run in an elevated shell (it only reads; elevation is for visibility).'
+    Write-Host 'Run this once in an elevated 64-bit Windows PowerShell:'
+    Write-Host ('  powershell ' + ($argv -join ' '))
+    exit 1
+}
+if ($AppFile) {
+    $line = @([IO.File]::ReadAllLines($AppFile, [Text.Encoding]::UTF8) | Where-Object { $_.Trim() })[0]
+    if (-not $line) { throw "-AppFile is empty: $AppFile" }
+    $App = $line.Trim().TrimStart([char]0xFEFF)
+}
+if (-not $App -and -not $Root) { throw 'Pass -App, -AppFile and/or -Root.' }
+if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) {
+    Write-Warning '32-bit PowerShell on 64-bit Windows: module lists of 64-bit processes will be missing. Use 64-bit powershell.exe.'
+}
+
+$outDir = [IO.Path]::GetFullPath($Out)
+foreach ($d in $outDir, (Join-Path $outDir 'tasks'), (Join-Path $outDir 'services')) { [void][IO.Directory]::CreateDirectory($d) }
+$utf8 = New-Object Text.UTF8Encoding($false)
+function Save-Json([string]$name, $obj) { [IO.File]::WriteAllText((Join-Path $outDir $name), (ConvertTo-Json -InputObject $obj -Depth 8), $utf8) }
+$bundle = [ordered]@{
+    schema = 'app-debloat.elevated-readonly/1'; captured_at = (Get-Date).ToUniversalTime().ToString('o')
+    params = [ordered]@{ app = $App; root = @($Root) }; steps = [ordered]@{}; failures = New-Object System.Collections.Generic.List[object]
+}
+function Add-Fail([string]$step, [string]$target, [string]$err) { $bundle.failures.Add([ordered]@{ step = $step; target = $target; error = $err }) }
+$appRx = $null; if ($App) { $appRx = New-Object regex($App, 'IgnoreCase') }
+
+# ---------------------------------------------------------------- 1. elevated inventory
+$invPath = Join-Path $outDir 'inventory-elevated.json'
+$invRoots = @()
+if (-not $NoInventory) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $ia = @{ Out = $invPath }
+        if ($App) { $ia.App = $App }
+        if ($Root) { $ia.Root = $Root }
+        if ($NoSignature) { $ia.NoSignature = $true }
+        & (Join-Path $PSScriptRoot 'inventory.ps1') @ia | Out-Host
+        # JavaScriptSerializer tolerates keys that ConvertFrom-Json in 5.1 rejects.
+        Add-Type -AssemblyName System.Web.Extensions
+        $js = New-Object Web.Script.Serialization.JavaScriptSerializer; $js.MaxJsonLength = [int]::MaxValue
+        $inv = $js.DeserializeObject([IO.File]::ReadAllText($invPath, [Text.Encoding]::UTF8))
+        foreach ($r in @($inv['roots'])) { if ($r -and $r['path']) { $invRoots += [string]$r['path'] } }
+        $bundle.steps['inventory'] = [ordered]@{ file = 'inventory-elevated.json'; roots = $invRoots; ms = $sw.ElapsedMilliseconds }
+    } catch { Add-Fail 'inventory' $invPath $_.Exception.Message }
+}
+
+$roots = @(foreach ($r in @($Root) + $invRoots) {
+    if (-not $r) { continue }
+    try { [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($r.Trim('"'))).TrimEnd('\') } catch { }
+}) | Sort-Object -Unique
+$prefixes = New-Object System.Collections.Generic.List[string]
+foreach ($r in $roots) {
+    $prefixes.Add($r.ToLowerInvariant())
+    try { $sp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($r).ShortPath.TrimEnd('\').ToLowerInvariant(); if (-not $prefixes.Contains($sp)) { $prefixes.Add($sp) } } catch { }
+}
+$bundle.roots = @($roots)
+function Test-Refs([string]$s) {
+    # does a command line, path or argument string mention one of the roots?
+    if (-not $s) { return $false }
+    $l = [Environment]::ExpandEnvironmentVariables($s).Replace('/', '\').ToLowerInvariant()
+    foreach ($p in $prefixes) { if ($l.Contains($p + '\') -or $l.Contains($p + '"') -or $l.EndsWith($p)) { return $true } }
+    $false
+}
+function Safe-Name([string]$s) { $n = ($s -replace '[\\/:*?"<>|\s]+', '_').Trim('_'); if ($n.Length -gt 120) { $n = $n.Substring(0, 120) }; $n }
+
+# ---------------------------------------------------------------- 2. scheduled tasks (SYSTEM included)
+try {
+    $taskIdx = New-Object System.Collections.Generic.List[object]
+    foreach ($t in @(Get-ScheduledTask)) {
+        $why = $null
+        foreach ($a in @($t.Actions)) {
+            if ($a.CimClass.CimClassName -eq 'MSFT_TaskExecAction' -and (Test-Refs "$($a.Execute) $($a.Arguments) $($a.WorkingDirectory)")) { $why = 'root'; break }
+        }
+        if (-not $why -and $appRx -and $appRx.IsMatch("$($t.TaskPath)$($t.TaskName) $($t.Author) $($t.Description)")) { $why = 'app' }
+        if (-not $why) { continue }
+        $file = (Safe-Name "$($t.TaskPath)$($t.TaskName)") + '.xml'
+        try { [IO.File]::WriteAllText((Join-Path $outDir "tasks\$file"), (Export-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath), $utf8) }
+        catch { Add-Fail 'tasks' "$($t.TaskPath)$($t.TaskName)" $_.Exception.Message; $file = $null }
+        $info = $null; try { $info = Get-ScheduledTaskInfo -TaskName $t.TaskName -TaskPath $t.TaskPath } catch { }
+        $taskIdx.Add([ordered]@{
+            path = $t.TaskPath; name = $t.TaskName; match = $why; state = $t.State.ToString(); user = $t.Principal.UserId
+            run_level = $t.Principal.RunLevel.ToString(); hidden = $t.Settings.Hidden; author = $t.Author; xml = $file
+            actions = @(foreach ($a in @($t.Actions)) { [ordered]@{ type = $a.CimClass.CimClassName -replace '^MSFT_Task', ''; execute = $a.Execute; arguments = $a.Arguments; class_id = $a.ClassId } })
+            last_run = $(if ($info -and $info.LastRunTime) { $info.LastRunTime.ToString('o') }); last_result = $(if ($info) { '0x{0:x}' -f $info.LastTaskResult })
+            next_run = $(if ($info -and $info.NextRunTime) { $info.NextRunTime.ToString('o') })
+        })
+    }
+    Save-Json 'tasks.json' $taskIdx.ToArray()
+    $bundle.steps['tasks'] = [ordered]@{ file = 'tasks.json'; count = $taskIdx.Count }
+} catch { Add-Fail 'tasks' '(all)' $_.Exception.Message }
+
+# ---------------------------------------------------------------- 3. services: qc, qfailure, qtriggerinfo, sdshow
+try {
+    $svcIdx = New-Object System.Collections.Generic.List[object]
+    foreach ($s in @(Get-CimInstance Win32_Service)) {
+        $why = $null
+        if (Test-Refs $s.PathName) { $why = 'root' }
+        elseif ($appRx -and $appRx.IsMatch("$($s.Name)|$($s.DisplayName)|$($s.PathName)")) { $why = 'app' }
+        if (-not $why) { continue }
+        $sb = New-Object Text.StringBuilder
+        foreach ($q in 'qc', 'qfailure', 'qtriggerinfo', 'sdshow') {
+            [void]$sb.AppendLine("===== sc.exe $q $($s.Name)")
+            try { $o = & sc.exe $q $s.Name 2>&1 | Out-String; [void]$sb.AppendLine($o.TrimEnd()); [void]$sb.AppendLine("exit $LASTEXITCODE") }
+            catch { [void]$sb.AppendLine("error: $($_.Exception.Message)"); Add-Fail 'services' "$q $($s.Name)" $_.Exception.Message }
+        }
+        $file = (Safe-Name $s.Name) + '.txt'
+        [IO.File]::WriteAllText((Join-Path $outDir "services\$file"), $sb.ToString(), $utf8)
+        $svcIdx.Add([ordered]@{ name = $s.Name; display_name = $s.DisplayName; match = $why; path = $s.PathName; start_mode = $s.StartMode
+            state = $s.State; account = $s.StartName; pid = [int]$s.ProcessId; file = $file })
+    }
+    Save-Json 'services.json' $svcIdx.ToArray()
+    $bundle.steps['services'] = [ordered]@{ file = 'services.json'; count = $svcIdx.Count }
+} catch { Add-Fail 'services' '(all)' $_.Exception.Message }
+
+# ---------------------------------------------------------------- 4. module lists, 32-bit included
+Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public static class AdElev {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct MODULEENTRY32W {
+        public uint dwSize, th32ModuleID, th32ProcessID, GlblcntUsage, ProccntUsage;
+        public IntPtr modBaseAddr; public uint modBaseSize; public IntPtr hModule;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string szModule;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExePath;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint f, uint pid);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool Module32FirstW(IntPtr h, ref MODULEENTRY32W e);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool Module32NextW(IntPtr h, ref MODULEENTRY32W e);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint a, bool i, uint pid);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsWow64Process(IntPtr h, out bool w);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageNameW(IntPtr h, uint f, StringBuilder s, ref uint n);
+    public class Mod { public string Path; public string Base; public uint Size; }
+    public static string ImagePath(uint pid, out int wow) {
+        wow = -1; IntPtr h = OpenProcess(0x1000, false, pid);
+        if (h == IntPtr.Zero) return null;
+        try {
+            bool w; if (IsWow64Process(h, out w)) wow = w ? 1 : 0;
+            var sb = new StringBuilder(1024); uint n = 1024; return QueryFullProcessImageNameW(h, 0, sb, ref n) ? sb.ToString() : null;
+        } finally { CloseHandle(h); }
+    }
+    public static Mod[] Modules(uint pid, out int err) {
+        err = 0; IntPtr snap = new IntPtr(-1);
+        for (int i = 0; i < 5; i++) {
+            snap = CreateToolhelp32Snapshot(0x8 | 0x10, pid);   // TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32
+            if (snap != new IntPtr(-1)) break;
+            err = Marshal.GetLastWin32Error(); if (err != 24) return null;   // ERROR_BAD_LENGTH: retry
+        }
+        if (snap == new IntPtr(-1)) return null;
+        err = 0; var list = new List<Mod>();
+        try {
+            var e = new MODULEENTRY32W(); e.dwSize = (uint)Marshal.SizeOf(typeof(MODULEENTRY32W));
+            if (Module32FirstW(snap, ref e)) { do { list.Add(new Mod { Path = e.szExePath, Base = "0x" + e.modBaseAddr.ToInt64().ToString("x"), Size = e.modBaseSize }); } while (Module32NextW(snap, ref e)); }
+        } finally { CloseHandle(snap); }
+        return list.ToArray();
+    }
+}
+'@
+try {
+    $modIdx = New-Object System.Collections.Generic.List[object]
+    foreach ($p in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine)) {
+        $id = [uint32]$p.ProcessId; if ($id -le 4) { continue }
+        $wow = -1; $img = [AdElev]::ImagePath($id, [ref]$wow); if (-not $img) { $img = $p.ExecutablePath }
+        if (-not (Test-Refs $img)) { continue }
+        $err = 0; $mods = [AdElev]::Modules($id, [ref]$err)
+        if ($null -eq $mods) { Add-Fail 'modules' "pid $id" "Toolhelp32 error $err" }
+        $modIdx.Add([ordered]@{
+            pid = [int]$id; ppid = [int]$p.ParentProcessId; name = $p.Name; image = $img; command_line = $p.CommandLine
+            wow64 = $(if ($wow -eq 1) { $true } elseif ($wow -eq 0) { $false } else { $null }); error = $(if ($null -eq $mods) { $err })
+            modules = @(foreach ($m in @($mods)) { if ($m) { [ordered]@{ path = $m.Path; base = $m.Base; size = $m.Size } } })
+        })
+    }
+    Save-Json 'modules.json' $modIdx.ToArray()
+    $bundle.steps['modules'] = [ordered]@{ file = 'modules.json'; processes = $modIdx.Count; wow64 = @($modIdx | Where-Object { $_.wow64 }).Count }
+} catch { Add-Fail 'modules' '(all)' $_.Exception.Message }
+
+Save-Json 'bundle.json' $bundle
+Write-Host ("elevated bundle: tasks {0}, services {1}, processes {2}, failures {3}" -f `
+    $(if ($bundle.steps['tasks']) { $bundle.steps['tasks'].count } else { 'n/a' }),
+    $(if ($bundle.steps['services']) { $bundle.steps['services'].count } else { 'n/a' }),
+    $(if ($bundle.steps['modules']) { $bundle.steps['modules'].processes } else { 'n/a' }), $bundle.failures.Count)
+Write-Host "out: $outDir"

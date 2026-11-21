@@ -71,6 +71,8 @@ CONTOSO = {
     },
     "core": {
         "files": ["{ver}\\ContosoTool.exe", "{ver}\\ContosoCloud.exe", "{ver}\\ContosoImeBroker.exe"],
+        # Must survive, but set-type actions (ini-set here) may edit its content; core.files may not be touched at all.
+        "preserve": ["{sharedData}\\cloud.ini"],
         "processes": ["ContosoTool.exe", "ContosoCloud.exe", "ContosoImeBroker.exe", "ctfmon.exe"],
         "restartable": ["ContosoTool.exe", "ContosoCloud.exe"],
         "services": [],
@@ -97,7 +99,8 @@ CONTOSO = {
             stopHosts=["{ver}\\ContosoTool.exe", "{ver}\\ContosoCloud.exe"]),
         act("ai-dirs", "dir-placeholder-file", "ai", ["L-A1"], checkLoaded=True, evidence="hypothesis", when="RemoveAiFolders",
             evidenceNote="folder names suggest AI add-ons; no load or launch edge anchored",
-            target=["{root}\\Components\\AiChat", "{root}\\Components\\Pet", "{sharedData}\\AiCache"]),
+            target=["{root}\\Components\\AiChat", "{root}\\Components\\Pet", "{sharedData}\\AiCache"],
+            stopHosts=["{ver}\\ContosoTool.exe"]),
         act("pdf-lock", "acl-deny-write", "promo", ["L-P3"], principal="CurrentUser", emptyFirst=True,
             createIfMissing=True, target=["{pdfDir}"]),
         act("shellext", "shellext-block", "promo", ["L-P4"], clsids=["{0C0A0000-1111-4222-8333-444455556666}"],
@@ -110,6 +113,8 @@ CONTOSO = {
             target=["ContosoComMgr.exe", "ContosoUpdate.exe", "ContosoBizLauncher.exe", "ContosoAiChat.exe"]),
         act("env-ini", "preboot-file-edit", "ad", ["L-G2"], target=["{userData}\\*\\env.ini"], section="Setting",
             set={"AutoUpdate": "2", "EnableAdsDispatch": "0", "AiChatSwitch": "0"}, dropFromSections=["SyncMode"]),
+        act("cloud-autocheck", "ini-set", "updater", ["L-R5"], path="{sharedData}\\cloud.ini", section="Update",
+            key="AutoCheck", value="0", onlyWhenNotRunning=["{ver}\\ContosoCloud.exe"]),
         act("sync", "ifeo-block", "telemetry", ["L-T2"], when="NoSync", target=["ContosoUserSync.exe"]),
         act("net", "firewall-block-program", "telemetry", ["L-T3"], when="BlockNet", target=["{ver}\\ContosoTool.exe"]),
     ],
@@ -144,6 +149,7 @@ FABRIKAM = {
     },
     "core": {
         "files": ["{root}\\FabrikamDrive.exe", "{root}\\FabrikamDriveHost.exe", "{root}\\resources\\app.asar"],
+        "preserve": ["{appData}\\settings.json"],
         "processes": ["FabrikamDrive.exe", "FabrikamDriveHost.exe"],
         "restartable": [],
         "services": ["FabrikamDriveSyncSvc"],
@@ -175,6 +181,10 @@ FABRIKAM = {
         act("toast", "toast-off", "ad", ["L-A3"], target=["com.fabrikam.drive*"]),
         act("settings", "reg-set", "ad", ["L-A4"], target="HKCU\\Software\\Fabrikam\\Drive", kind="DWord",
             values={"ShowPromotions": 0, "AiAssistantEnabled": 0}),
+        act("promo-banner", "json-set", "ad", ["L-A5"], path="{appData}\\settings.json", pointer="/promotions/showBanner",
+            value=False, onlyWhenNotRunning=["{root}\\FabrikamDrive.exe"]),
+        act("ai-entry", "json-set", "ai", ["L-A6"], unless="KeepAi", path="{appData}\\settings.json",
+            pointer="/ai/assistant/enabled", value=False, onlyWhenNotRunning=["{root}\\FabrikamDrive.exe"]),
         act("report-net", "firewall-block-program", "telemetry", ["L-T1"], evidence="inferred", when="BlockReporter",
             evidenceNote="name and strings suggest crash and usage reports only", target=["{root}\\FabrikamReport.exe"]),
         act("ifeo", "ifeo-block", "updater", ["L-R5", "L-A1"], target=["FabrikamUpdate.exe", "FabrikamAdHelper.exe"]),
@@ -271,6 +281,7 @@ def fake_tree(root: Path):
     ini = "[Setting]\r\nAutoUpdate=1\r\nEnableAdsDispatch=1\r\nFontSize=14\r\n\r\n[SyncMode]\r\nEnableAdsDispatch=1\r\nFontSize=1\r\n"
     (ud / "env.ini").write_bytes(b"\xff\xfe" + ini.encode("utf-16-le"))
     f(c / "ProgramData" / "ContosoPinyin" / "AiCache" / "model_synthetic.bin")
+    (c / "ProgramData" / "ContosoPinyin" / "cloud.ini").write_bytes(b"[Update]\r\nAutoCheck=1\r\nChannel=stable\r\n")
     f(c / "LocalAppData" / "ContosoPDF" / "pdf_viewer.exe")
 
     d = root / "fabrikam"
@@ -283,7 +294,8 @@ def fake_tree(root: Path):
     f(app / "resources" / "plugins" / "promo_popup.exe")
     f(app / "resources" / "plugins" / "ai-assistant" / "index.js", "// synthetic\n")
     f(d / "LocalAppData" / "fabrikam-drive-updater" / "pending" / "FabrikamDrive-Setup-5.4.0.exe")
-    (d / "Roaming" / "FabrikamDrive").mkdir(parents=True, exist_ok=True)
+    f(d / "Roaming" / "FabrikamDrive" / "settings.json",
+      '{\n  "promotions": { "showBanner": true, "lastShown": "2030-01-01" },\n  "window": { "width": 1200 }\n}\n')
 
     return {
         "CONTOSOPINYIN_ROOT": str(pf),

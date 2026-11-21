@@ -67,6 +67,9 @@
       "{root}\\FabrikamDriveHost.exe",
       "{root}\\resources\\app.asar"
     ],
+    "preserve": [
+      "{appData}\\settings.json"
+    ],
     "processes": [
       "FabrikamDrive.exe",
       "FabrikamDriveHost.exe"
@@ -253,6 +256,41 @@
         "ShowPromotions": 0,
         "AiAssistantEnabled": 0
       }
+    },
+    {
+      "id": "promo-banner",
+      "type": "json-set",
+      "category": "ad",
+      "rationale": [
+        "L-A5"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "path": "{appData}\\settings.json",
+      "pointer": "/promotions/showBanner",
+      "value": false,
+      "onlyWhenNotRunning": [
+        "{root}\\FabrikamDrive.exe"
+      ]
+    },
+    {
+      "id": "ai-entry",
+      "type": "json-set",
+      "category": "ai",
+      "rationale": [
+        "L-A6"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "unless": "KeepAi",
+      "path": "{appData}\\settings.json",
+      "pointer": "/ai/assistant/enabled",
+      "value": false,
+      "onlyWhenNotRunning": [
+        "{root}\\FabrikamDrive.exe"
+      ]
     },
     {
       "id": "report-net",

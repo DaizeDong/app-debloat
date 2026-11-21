@@ -82,6 +82,9 @@
       "{ver}\\ContosoCloud.exe",
       "{ver}\\ContosoImeBroker.exe"
     ],
+    "preserve": [
+      "{sharedData}\\cloud.ini"
+    ],
     "processes": [
       "ContosoTool.exe",
       "ContosoCloud.exe",
@@ -224,6 +227,9 @@
         "{root}\\Components\\AiChat",
         "{root}\\Components\\Pet",
         "{sharedData}\\AiCache"
+      ],
+      "stopHosts": [
+        "{ver}\\ContosoTool.exe"
       ]
     },
     {
@@ -345,6 +351,24 @@
       },
       "dropFromSections": [
         "SyncMode"
+      ]
+    },
+    {
+      "id": "cloud-autocheck",
+      "type": "ini-set",
+      "category": "updater",
+      "rationale": [
+        "L-R5"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "path": "{sharedData}\\cloud.ini",
+      "section": "Update",
+      "key": "AutoCheck",
+      "value": "0",
+      "onlyWhenNotRunning": [
+        "{ver}\\ContosoCloud.exe"
       ]
     },
     {

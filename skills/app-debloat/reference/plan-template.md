@@ -1,18 +1,19 @@
-# plan.md template
+# Plan Template
 
 `plan.md` is the P4 deliverable: the reviewed decision record that the manifest (P5) is built from. It is DATA and lives in the app's folder in the private companion, next to the ledger it cites. Examples here are synthetic (`ExampleApp` by `AcmeCorp`).
 
 A plan has exactly five mandatory sections, in this order, each with the concrete contents listed below. A section that cannot be filled says "unknown" and why; a missing or empty section means P4 is not done. Every factual sentence cites ledger IDs (`reference/ledger.md`); a sentence without one is an opinion and is labelled as such.
 
-## Rules that apply to every section
+## Rules That Apply to Every Section
 
 - **Status decides activation.** Each action copies the evidence status of the weakest ledger entry it relies on (`observed`, `anchored`, `inferred`, `hypothesis`). Only `observed` and `anchored` actions may be default actions. `inferred` and `hypothesis` actions ship inactive behind a named option (manifest `options[]` plus `when`), with the probe that would promote them. A hypothesis never becomes a default action, however plausible.
+- **Owner choice does not change evidence.** When the owner chooses to pass an option at apply (for example a blanket "block all updaters"), the plan lists that action as `owner choice: <Name>` and keeps its evidence status as it was. Owner consent turns an option on; it never promotes `inferred` to `observed`.
 - **No unproven promises.** Do not claim a component is "fully blocked", "never returns" or "gone" unless a ledger `VER` entry shows it after the relevant trigger. Without that, write what the action does and what is still unknown.
 - **Leaving something untouched is a valid result.** An evidence-backed decision not to act (core dependency, shared component, no safe lever, licensing risk) is recorded as a decision with its IDs, not as a gap.
 - **Narrowest control wins.** Prefer an app-owned switch over a per-app block, a per-binary block over a per-folder block, and anything over a machine-wide or shared change.
 - **Proposed is not performed.** Every check is labelled `proposed` or `performed`; only `performed` checks carry results, timestamps and `VER` IDs.
 
-## 1. Core preservation
+## 1. Core Preservation
 
 What must keep working, and therefore what must not be touched.
 
@@ -30,7 +31,7 @@ Must contain:
 | AiPanel\          | AI         | unknown | main window imports it; impact untested| L-INV-019 (hypothesis)  |
 ```
 
-## 2. Targeted levers
+## 2. Targeted Levers
 
 What each action changes and why that is the smallest sufficient change.
 
@@ -81,7 +82,7 @@ Must also contain:
 - **Recovery** when the app is broken after apply: the shortest path back (uninstall mode, then the app's own repair, then reinstall), and which data survives.
 - **Later user changes**: how settings the user changed after apply, files added to the state folder, and unrelated rules or tasks with similar names are preserved.
 
-## 5. Feasibility and honesty
+## 5. Feasibility and Honesty
 
 What will actually be done, by whom, and what is still not known.
 
@@ -89,13 +90,17 @@ Must contain:
 - **Sequence**: the numbered steps from dry run to verified install, with the command for each and where the owner must act (approval, consent for account-bound apps, reboot, triggering an update).
 - **Privileges**: which actions need elevation, which run as the user, which need SYSTEM or TrustedInstaller-owned keys, and what happens to them when the script runs without those rights.
 - **Residual risks**: concrete ones for this app (for example "the main window may re-enable the AI panel after a server switch; L-GATE-004 is inferred").
+- **Security-update cost** (required whenever an action blocks the updater of a browser engine, an embedded Chromium or another network-facing component): the engine version that is now frozen, that it will miss security fixes, and how the owner updates by hand (re-run the vendor installer, then P1 to P3 and `-Install`).
+- **Server-pushed in-window content**: ads, popups and promotions drawn inside the app's own window from a remote config are a documented residual unless the owner opts into network-level blocking (router, DNS filter or proxy rule they run themselves). Name the config source and the probe that shows it.
 - **Unresolved areas**: every open `hypothesis` and `unknown` that touches the plan, with the probe that would settle it.
 - **Validation split**: two separate lists. `Proposed checks`: what P6 will do. `Validation performed`: what was actually run, when, on which version, with results and `VER` IDs. Do not merge them, and do not describe a proposed check in the past tense.
 
-## Checklist before approval
+## Checklist Before Approval
 
 - Five sections present, in order, none blank.
 - Every default action is `observed` or `anchored`; every other action sits behind a named option.
+- Every owner-choice action is marked as such with its original evidence status.
+- Section 5 states the security-update cost for every blocked updater of a browser engine or network-facing component.
 - Every `keep` and every untouched candidate has a reason and IDs.
 - Every return path in the ledger appears in the durability matrix.
 - Every action has original state, ownership, undo with a conflict rule, and a place in the rollback order.

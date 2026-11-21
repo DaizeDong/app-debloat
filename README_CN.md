@@ -7,7 +7,7 @@
 [![No Binary Patching](https://img.shields.io/badge/Binary%20Patching-None-green?style=flat)](skills/app-debloat/reference/safety.md)
 [![Auto Re-Apply](https://img.shields.io/badge/App%20Updates-Auto%20Re--Apply-green?style=flat)](skills/app-debloat/reference/pipeline.md)
 [![Languages](https://img.shields.io/badge/Languages-EN%20%2F%20CN-blue?style=flat)](#语言)
-[![Roadmap](https://img.shields.io/badge/Roadmap-v0.1.2-purple?style=flat)](ROADMAP.md)
+[![Roadmap](https://img.shields.io/badge/Roadmap-v0.1.3-purple?style=flat)](ROADMAP.md)
 
 [English](README.md) | [中文版](README_CN.md)
 

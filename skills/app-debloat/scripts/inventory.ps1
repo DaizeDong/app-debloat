@@ -2,8 +2,9 @@
 <#
 .SYNOPSIS
   Read-only inventory of one installed Windows desktop app: install roots, files, processes,
-  modules, services, tasks, autostarts, COM, shell extensions, TSF, protocols, firewall,
-  connections, toast AUMIDs, shortcuts, WMI, BITS. Writes one JSON snapshot.
+  modules, services, tasks, autostarts, COM, shell extensions (with their effective merged-HKCR
+  state), TSF, protocols, firewall, connections, DNS cache names, toast AUMIDs, shortcuts, WMI,
+  BITS, and signs of a pending or half-applied update. Writes one JSON snapshot.
 
 .DESCRIPTION
   Changes nothing on the machine. Works without elevation; whatever it could not read is listed
@@ -13,7 +14,14 @@
 
 .PARAMETER App
   Regex matched against Uninstall DisplayName/Publisher, service names, COM names, task names,
-  AUMIDs and so on. Example: 'Sogou|SogouInput'.
+  AUMIDs and so on. Example: 'Sogou|SogouInput'. Keep it ASCII: Windows PowerShell 5.1 often
+  receives non-ASCII arguments in the wrong code page, and the mangled regex silently matches
+  nothing. The script warns when -App holds non-ASCII characters; use -AppFile or -Root instead.
+  The pattern actually used is recorded in params.app.
+
+.PARAMETER AppFile
+  UTF-8 text file holding the -App regex, for non-ASCII names. Blank lines and lines starting
+  with # are ignored; several remaining lines are joined with '|'. Cannot be combined with -App.
 
 .PARAMETER Root
   One or more install directories. When omitted, roots come from Uninstall entries matching -App
@@ -24,10 +32,12 @@
   Output JSON path (required). There is no default, so the tool never writes inside a repo.
 
 .PARAMETER MaxFiles
-  Cap on PE files that get version, signature and sha256 detail. Default 1500.
+  Cap on PE files per root that get version, signature and sha256 detail. Default 1500. The PE
+  files of each root are sorted by relative path before the cap applies, so two snapshots of the
+  same tree hash the same set; roots[].capped is true when the cap cut the list.
 
 .PARAMETER MaxEntries
-  Cap on file system entries walked per root. Default 60000.
+  Cap on file system entries walked per root (in sorted order). Default 60000.
 
 .PARAMETER NoSignature
   Skip Authenticode checks (faster).
@@ -37,27 +47,48 @@
   with %USERPROFILE% and %USERNAME% so snapshots diff across machines.
 
 .PARAMETER AutorunsAcceptEula
-  Run Sysinternals autorunsc (if on PATH) with -accepteula. Without it, autorunsc runs only when
-  its EULA was already accepted, because otherwise it opens a blocking EULA dialog.
+  Run Sysinternals autorunsc with -accepteula. Without it, autorunsc runs only when its EULA was
+  already accepted, because otherwise it opens a blocking EULA dialog.
+
+.PARAMETER AutorunsPath
+  autorunsc64.exe / autorunsc.exe, or the folder holding it. Without it the script looks on PATH,
+  then in %LOCALAPPDATA%\Programs\Sysinternals (where setup_re_backend.ps1 installs it). The
+  binary runs only when its Authenticode signature is valid and signed by Microsoft.
 
 .EXAMPLE
   .\inventory.ps1 -App 'ExampleApp' -Out "$env:TEMP\exampleapp-before.json"
   .\inventory.ps1 -Root "$env:ProgramFiles\ExampleApp" -App 'Example' -Out D:\private\inv.json
+  .\inventory.ps1 -AppFile D:\private\app-pattern.txt -Out D:\private\inv.json
 #>
 [CmdletBinding()]
 param(
     [string]$App,
+    [string]$AppFile,
     [string[]]$Root,
     [Parameter(Mandatory = $true)][string]$Out,
     [int]$MaxFiles = 1500,
     [int]$MaxEntries = 60000,
     [switch]$NoSignature,
     [switch]$KeepPaths,
-    [switch]$AutorunsAcceptEula
+    [switch]$AutorunsAcceptEula,
+    [string]$AutorunsPath
 )
-$ToolVersion = '1.0.0'
+$ToolVersion = '1.1.0'
 $ErrorActionPreference = 'Stop'
-if (-not $App -and -not $Root) { throw 'Pass -App <regex> and/or -Root <dir>.' }
+$AppSource = $null
+if ($AppFile) {
+    if ($App) { throw 'Pass -App or -AppFile, not both.' }
+    $appFull = (Resolve-Path -LiteralPath $AppFile).ProviderPath
+    $lines = [IO.File]::ReadAllText($appFull, [Text.Encoding]::UTF8) -split "`r?`n"
+    $parts = @($lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
+    if (-not $parts.Count) { throw "-AppFile $AppFile holds no pattern." }
+    $App = $parts -join '|'; $AppSource = 'file'
+} elseif ($App) { $AppSource = 'param' }
+if (-not $App -and -not $Root) { throw 'Pass -App <regex>, -AppFile <utf8 file> and/or -Root <dir>.' }
+$AppNonAscii = [bool]($App -and $AppSource -eq 'param' -and $App -match '[^\x00-\x7F]')
+if ($AppNonAscii) {
+    Write-Warning ("-App contains non-ASCII characters and arrived as '{0}'. Windows PowerShell 5.1 often receives such arguments in the wrong code page, so the regex may match nothing. Use an ASCII pattern, -AppFile <utf8 file> or -Root." -f $App)
+}
 
 # ---------------------------------------------------------------- native helpers (read-only)
 Add-Type -TypeDefinition @'
@@ -129,7 +160,7 @@ $Snap = [ordered]@{
         ps_version = $PSVersionTable.PSVersion.ToString()
         elevated   = $IsAdmin
     }
-    params          = [ordered]@{ app = $App; root = @($Root); max_files = $MaxFiles }
+    params          = [ordered]@{ app = $App; app_source = $AppSource; app_non_ascii = $AppNonAscii; root = @($Root); max_files = $MaxFiles; max_entries = $MaxEntries }
     roots           = New-Object System.Collections.Generic.List[object]
     related_files   = New-Object System.Collections.Generic.List[object]
     fingerprints    = [ordered]@{}
@@ -140,6 +171,9 @@ $Snap = [ordered]@{
 }
 if (-not $IsAdmin) {
     $Snap.notes.Add('Not elevated: other-user and SYSTEM process paths, command lines and modules, protected scheduled tasks, WMI subscriptions and all-user BITS jobs are partly or fully invisible.')
+}
+if ($AppNonAscii) {
+    $Snap.notes.Add('params: -App held non-ASCII characters; check params.app against what was typed. A mangled pattern matches nothing; rerun with -AppFile or -Root.')
 }
 if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) {
     $Snap.notes.Add('32-bit PowerShell on 64-bit Windows: module lists of 64-bit processes are unavailable. Use 64-bit powershell.exe.')
@@ -462,6 +496,9 @@ Invoke-Section 'services' {
         Add-Item 'services' $o
         if ($kind -eq 'app') { $f = Get-PathFromCommand $s.PathName; if ($f -and -not (Test-UnderRoot $f)) { Add-Related $f "service:$($s.Name)" } }
     }
+    if (@(Get-Items 'services' | Where-Object { $_ -and $_.kind -eq 'service' -and $_.start_mode -eq 'Manual' }).Count) {
+        $Snap.notes.Add('services: Manual services run on demand (the app can start them itself or through COM activation), so Manual + Stopped does not mean unused; check the service log or a Procmon trace of an app launch.')
+    }
 }
 
 # ---------------------------------------------------------------- files
@@ -505,21 +542,38 @@ $PeExt = '.exe', '.dll', '.ime', '.sys', '.ocx', '.ax', '.cpl', '.node'
 $CfgExt = '.ini', '.json', '.yml', '.yaml', '.xml', '.cfg', '.conf', '.asar', '.cupf', '.config', '.plist', '.db'
 $script:PeNames = @{}
 $script:ExeNames = @{}
+$script:RuntimeRx = '^$'
+# Pending-update probe: folders that look like update staging, and the package types staged there.
+$UpdateDirRx = New-Object regex('(^|\\)[^\\]*(update|upgrade|patch|download|staging|pending|newver|installer|setup|package)[^\\]*\\', 'IgnoreCase')
+$PackageExt = '.msi', '.msp', '.cab', '.zip', '.7z', '.rar'
+$StagedExeRx = New-Object regex('setup|install|full|delta|patch|\d+[._]\d+[._]\d+', 'IgnoreCase')
+function Add-Pending([string]$kind, [IO.FileSystemInfo]$e, [string]$root, [string]$rel, [string]$pair) {
+    $o = [ordered]@{ key = "pending|$kind|$($e.FullName.ToLowerInvariant())"; kind = $kind; path = $e.FullName; root = $root; rel = $rel
+        size = $(if ($e -is [IO.FileInfo]) { $e.Length }); mtime = $e.LastWriteTimeUtc.ToString('o'); file_version = $null; pair = $pair; pair_version = $null }
+    try { if ($e -is [IO.FileInfo]) { $o.file_version = [Diagnostics.FileVersionInfo]::GetVersionInfo($e.FullName).FileVersion } } catch { }
+    try { if ($pair) { $o.pair_version = [Diagnostics.FileVersionInfo]::GetVersionInfo($pair).FileVersion } } catch { }
+    Add-Item 'pending_update' $o
+}
 Invoke-Section 'files' {
-    $peBudget = $MaxFiles
     foreach ($r in $Snap.roots) {
-        $stats = [ordered]@{ entries = 0; files = 0; dirs = 0; bytes = 0; by_ext = @{}; truncated = $false; reparse_skipped = 0 }
-        $fpParts = New-Object System.Collections.Generic.List[string]
+        $stats = [ordered]@{ entries = 0; files = 0; dirs = 0; bytes = 0; by_ext = [ordered]@{}; pe_total = 0; pe_hashed = 0
+            capped = $false; entries_truncated = $false; truncated = $false; reparse_skipped = 0 }
+        $pe = New-Object System.Collections.Generic.List[object]
         $stack = New-Object System.Collections.Generic.Stack[string]; $stack.Push($r.path)
-        while ($stack.Count -gt 0) {
+        while ($stack.Count -gt 0 -and -not $stats.entries_truncated) {
             $dir = $stack.Pop()
             try { $entries = (New-Object IO.DirectoryInfo($dir)).GetFileSystemInfos() }
             catch { Add-Failure 'files' $dir $_.Exception.Message; continue }
+            $sortKeys = [string[]]@($entries | ForEach-Object { $_.Name.ToLowerInvariant() })
+            if ($entries.Length -gt 1) { [Array]::Sort($sortKeys, $entries, [StringComparer]::Ordinal) }
+            $names = @{}; foreach ($e in $entries) { $names[$e.Name.ToLowerInvariant()] = $true }
+            $subdirs = New-Object System.Collections.Generic.List[string]
             foreach ($e in $entries) {
                 $stats.entries++
-                if ($stats.entries -gt $MaxEntries) { $stats.truncated = $true; break }
+                if ($stats.entries -gt $MaxEntries) { $stats.entries_truncated = $true; break }
                 $rel = $e.FullName.Substring($r.path.Length).TrimStart('\')
                 $ext = $e.Extension.ToLowerInvariant()
+                $lname = $e.Name.ToLowerInvariant()
                 if ($e -is [IO.DirectoryInfo]) {
                     $stats.dirs++
                     if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { $stats.reparse_skipped++; continue }
@@ -527,34 +581,63 @@ Invoke-Section 'files' {
                         # A directory named like a binary is the classic anti-reinstall placeholder.
                         $sddl = $null; try { $sddl = (Get-Acl -LiteralPath $e.FullName).Sddl } catch { }
                         Add-Item 'placeholders' ([ordered]@{ key = "placeholder|$($e.FullName.ToLowerInvariant())"; path = $e.FullName; root = $r.path; rel = $rel; kind = 'directory'; sddl = $sddl; attributes = $e.Attributes.ToString() })
-                        if ($ext -eq '.exe') { $script:ExeNames[$e.Name.ToLowerInvariant()] = $true }
+                        if ($ext -eq '.exe') { $script:ExeNames[$lname] = $true }
                     }
-                    $stack.Push($e.FullName); continue
+                    $subdirs.Add($e.FullName); continue
                 }
                 $stats.files++; $stats.bytes += $e.Length
-                if ($stats.by_ext.ContainsKey($ext)) { $stats.by_ext[$ext]++ } else { $stats.by_ext[$ext] = 1 }
+                $extKey = $(if ($ext) { $ext } else { '(none)' })
+                if ($stats.by_ext.Contains($extKey)) { $stats.by_ext[$extKey]++ } else { $stats.by_ext[$extKey] = 1 }
+                # Half-applied update: X.new / X.old next to X, or a new_X.exe / X_new.exe swap next to X.exe.
+                # Only binaries, packages and configs count: Chromium's LevelDB keeps a 'LOG.old' in every store.
+                $baseExt = $(if ($ext -eq '.new' -or $ext -eq '.old') { [IO.Path]::GetExtension($lname.Substring(0, $lname.Length - $ext.Length)) })
+                if ($baseExt -and ($PeExt -contains $baseExt -or $PackageExt -contains $baseExt -or $CfgExt -contains $baseExt -or $baseExt -in '.pak', '.dat', '.bin')) {
+                    $base = $e.FullName.Substring(0, $e.FullName.Length - $ext.Length)
+                    Add-Pending $(if ($ext -eq '.new') { 'sibling_new' } else { 'sibling_old' }) $e $r.path $rel $(if ($names.ContainsKey([IO.Path]::GetFileName($base).ToLowerInvariant())) { $base })
+                } else {
+                    $m = [regex]::Match($lname, '^new[_.-](.+)$|^(.+?)[_.-]new(\.[^.]+)$')
+                    if ($m.Success -and ($PeExt -contains $ext -or $ext -eq '.asar')) {
+                        $other = $(if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value + $m.Groups[3].Value })
+                        if ($names.ContainsKey($other)) { Add-Pending 'swap' $e $r.path $rel (Join-Path $e.DirectoryName $other) }
+                    }
+                }
+                if ($UpdateDirRx.IsMatch($rel) -and (($PackageExt -contains $ext) -or ($ext -eq '.exe' -and $StagedExeRx.IsMatch($lname)))) {
+                    Add-Pending 'staged' $e $r.path $rel $null
+                }
                 if ($PeExt -contains $ext) {
-                    $script:PeNames[$e.Name.ToLowerInvariant()] = $true
-                    if ($ext -eq '.exe') { $script:ExeNames[$e.Name.ToLowerInvariant()] = $true }
-                    if ($peBudget -le 0) { $stats.truncated = $true; continue }
-                    $peBudget--
-                    $o = Get-PeDetail $e $r.path $rel
-                    if ($o.sha256) { $fpParts.Add("$($rel.ToLowerInvariant()):$($o.sha256)") }
-                    Add-Item 'files' $o
+                    $script:PeNames[$lname] = $true
+                    if ($ext -eq '.exe') { $script:ExeNames[$lname] = $true }
+                    $pe.Add([pscustomobject]@{ e = $e; rel = $rel; sort = $rel.ToLowerInvariant() })
                 } elseif ($CfgExt -contains $ext) {
                     Add-Item 'config_files' ([ordered]@{ key = "cfg|$($e.FullName.ToLowerInvariant())"; path = $e.FullName; root = $r.path; rel = $rel; size = $e.Length; mtime = $e.LastWriteTimeUtc.ToString('o') })
                 }
             }
-            if ($stats.truncated -and $stats.entries -gt $MaxEntries) { break }
+            for ($i = $subdirs.Count - 1; $i -ge 0; $i--) { $stack.Push($subdirs[$i]) }   # walk in name order
         }
+        # Sort per root before capping, so the same tree always hashes the same set.
+        $pe.Sort([Comparison[object]] { param($a, $b) [string]::CompareOrdinal($a.sort, $b.sort) })
+        $sortedPe = $pe.ToArray()
+        $stats.pe_total = $sortedPe.Count
+        $fpParts = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $sortedPe) {
+            if ($stats.pe_hashed -ge $MaxFiles) { $stats.capped = $true; break }
+            $stats.pe_hashed++
+            $o = Get-PeDetail $p.e $r.path $p.rel
+            if ($o.sha256) { $fpParts.Add("$($p.sort):$($o.sha256)") }
+            Add-Item 'files' $o
+        }
+        $stats.truncated = $stats.capped -or $stats.entries_truncated
         $r['stats'] = $stats
-        $sorted = @($fpParts | Sort-Object)
+        $r['capped'] = $stats.truncated
+        $sorted = @($fpParts | Sort-Object)   # same ordering as tool_version 1.0.0, so fingerprints stay comparable
         $sha = [Security.Cryptography.SHA256]::Create()
         $Snap.fingerprints[$r.path] = [ordered]@{
             pe_files = $sorted.Count
+            capped   = $stats.truncated
             sha256   = (-join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($sorted -join "`n"))) | ForEach-Object { $_.ToString('x2') }))
         }
-        if ($stats.truncated) { $Snap.notes.Add("Root $($r.path): scan truncated (MaxEntries=$MaxEntries or MaxFiles=$MaxFiles); fingerprint covers only hashed files.") }
+        if ($stats.capped) { $Snap.notes.Add("Root $($r.path): $($stats.pe_total) PE files, only the first $MaxFiles by path are hashed (MaxFiles); fingerprint covers only those.") }
+        if ($stats.entries_truncated) { $Snap.notes.Add("Root $($r.path): walk stopped at MaxEntries=$MaxEntries; files, config files and placeholders past that point are missing.") }
     }
     foreach ($rf in $Snap.related_files) {
         $fi = New-Object IO.FileInfo($rf.path)
@@ -564,13 +647,65 @@ Invoke-Section 'files' {
     # Name matching skips generic names and names Windows itself ships, to keep false positives down.
     $generic = 'setup.exe', 'uninst.exe', 'uninstall.exe', 'unins000.exe', 'update.exe', 'updater.exe', 'install.exe',
                'launcher.exe', 'helper.exe', 'crashpad_handler.exe', 'crashreporter.exe', 'elevate.exe', 'notification_helper.exe'
+    # Bundled runtimes and tools share their names with unrelated installs (a bundled node.exe would pull in
+    # every Node.js shortcut, firewall rule and file association), so they never match by name. A reference
+    # to the bundled copy still matches, because Get-RefKind checks the resolved roots before names.
+    $script:RuntimeRx = '^(node|nodejs|python[\d.]*|pythonw[\d.]*|py|pyw|java|javaw|javaws|jre|git|git-.+|bash|sh|perl|ruby|rubyw|php|php-cgi|lua|luajit|' +
+                 'dotnet|electron|chrome|chromium|msedge|msedgewebview2|cefsharp\.browsersubprocess|qtwebengineprocess|' +
+                 'cmd|powershell|pwsh|conhost|rundll32|regsvr32|wscript|cscript|mshta|curl|wget|aria2c|7z|7za|7zg|unzip|' +
+                 'ffmpeg|ffprobe|ffplay|adb|fastboot|openssl|sqlite3|vc_redist\.x(86|64)|vcredist_x(86|64))\.exe$'
+    $runtime = @($script:ExeNames.Keys | Where-Object { $_ -match $script:RuntimeRx } | Sort-Object)
     $specific = @($script:ExeNames.Keys | Where-Object {
-        $_.Length -ge 6 -and $generic -notcontains $_ -and
+        $_.Length -ge 6 -and $generic -notcontains $_ -and $_ -notmatch $script:RuntimeRx -and
         -not (Test-Path -LiteralPath (Join-Path $env:SystemRoot "System32\$_")) -and -not (Test-Path -LiteralPath (Join-Path $env:SystemRoot $_)) })
     if ($specific.Count) {
         $script:NameRx = New-Object regex(('(?:^|[\\/"\s=,])(' + (($specific | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')(?:$|["\s,])'), 'IgnoreCase')
     }
     $Snap['name_match_set'] = @($specific | Sort-Object)
+    $Snap['name_match_excluded_runtimes'] = $runtime
+}
+
+# ---------------------------------------------------------------- pending update: Uninstall version vs. file version
+# The .new/.old siblings, swaps and staged packages are collected during the file walk above.
+function Test-VersionMatch([string]$a, [string]$b) {
+    # Equal when one dotted version is a prefix of the other after trailing zeros are dropped ('8.0.5' ~ '8.0.5.0').
+    $pa = @([regex]::Matches("$a", '\d+') | ForEach-Object { [int64]$_.Value }); $pb = @([regex]::Matches("$b", '\d+') | ForEach-Object { [int64]$_.Value })
+    if (-not $pa.Count -or -not $pb.Count) { return $false }
+    while ($pa.Count -gt 1 -and $pa[-1] -eq 0) { $pa = @($pa[0..($pa.Count - 2)]) }
+    while ($pb.Count -gt 1 -and $pb[-1] -eq 0) { $pb = @($pb[0..($pb.Count - 2)]) }
+    $n = [Math]::Min($pa.Count, $pb.Count)
+    for ($i = 0; $i -lt $n; $i++) { if ($pa[$i] -ne $pb[$i]) { return $false } }
+    $true
+}
+Invoke-Section 'pending_update' {
+    foreach ($u in (Get-Items 'installs')) {
+        if (-not $u -or -not $u.display_version) { continue }
+        $cands = @()
+        $icon = $(if ($u.display_icon) { ("$($u.display_icon)" -replace ',\s*-?\d+$', '').Trim('"') })
+        if ($icon -and $icon -match '\.exe$') { $cands += [Environment]::ExpandEnvironmentVariables($icon) }
+        if (-not $cands.Count -and $u.install_location) {
+            $loc = [Environment]::ExpandEnvironmentVariables("$($u.install_location)".Trim('"'))
+            if (Test-Path -LiteralPath $loc -PathType Container) {
+                $cands += @(Get-ChildItem -LiteralPath $loc -Filter *.exe -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notmatch '^(unins|uninst|uninstall|setup|update|updater|crash)' } | ForEach-Object { $_.FullName })
+            }
+        }
+        $seen = @(); $ok = $false
+        foreach ($c in $cands) {
+            $fv = $null; $pv = $null; $exists = Test-Path -LiteralPath $c -PathType Leaf
+            if ($exists) { try { $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo($c); $fv = $vi.FileVersion; $pv = $vi.ProductVersion } catch { } }
+            $seen += [ordered]@{ path = $c; exists = $exists; file_version = $fv; product_version = $pv }
+            if ((Test-VersionMatch $u.display_version $fv) -or (Test-VersionMatch $u.display_version $pv)) { $ok = $true }
+        }
+        if (-not $cands.Count) { continue }
+        if (-not $ok) {
+            Add-Item 'pending_update' ([ordered]@{ key = "pending|version|$($u.scope)|$($u.subkey)".ToLowerInvariant(); kind = 'version_mismatch'
+                uninstall_key = "$($u.scope)\$($u.subkey)"; display_version = $u.display_version; main_exe = $seen })
+        }
+    }
+    if ((Get-Items 'pending_update').Count) {
+        $Snap.notes.Add('pending_update: signs of a half-applied or staged update (see items.pending_update). Settle it before P1: record it as an L-RI entry and ask the owner before finishing the vendor''s own swap.')
+    }
 }
 
 # ---------------------------------------------------------------- processes, modules, windows
@@ -579,15 +714,38 @@ Invoke-Section 'processes' {
     $all = @(Get-CimInstance Win32_Process)
     $byPid = @{}; foreach ($p in $all) { $byPid[[int]$p.ProcessId] = $p }
     $noPath = 0; $seen = @{}
+    # This inventory run is not the app: skip this PowerShell, its children, and the shells that launched it
+    # (their command lines carry -App). Ancestors inside a root are kept.
+    $self = @{ ([int]$PID) = $true }
+    $kids = @{}; foreach ($p in $all) { $pp = [int]$p.ParentProcessId; if (-not $kids[$pp]) { $kids[$pp] = @() }; $kids[$pp] += $p }
+    $queue = New-Object System.Collections.Generic.Queue[int]; $queue.Enqueue([int]$PID)
+    while ($queue.Count) {
+        $cur = $queue.Dequeue(); $curP = $byPid[$cur]
+        foreach ($c in @($kids[$cur])) {
+            if (-not $c -or $self.ContainsKey([int]$c.ProcessId)) { continue }
+            if ($curP -and $curP.CreationDate -and $c.CreationDate -and $c.CreationDate -lt $curP.CreationDate) { continue }   # reused PID
+            $self[[int]$c.ProcessId] = $true; $queue.Enqueue([int]$c.ProcessId)
+        }
+    }
+    $cur = $byPid[[int]$PID]
+    for ($i = 0; $cur -and $i -lt 16; $i++) {
+        $par = $byPid[[int]$cur.ParentProcessId]
+        if (-not $par -or $self.ContainsKey([int]$par.ProcessId)) { break }
+        if ($par.CreationDate -and $cur.CreationDate -and $par.CreationDate -gt $cur.CreationDate) { break }   # reused PID
+        if (-not (Test-UnderRoot $par.ExecutablePath)) { $self[[int]$par.ProcessId] = $true }
+        $cur = $par
+    }
+    $skippedSelf = 0
+    $helperRx = '^(powershell|pwsh|cmd|bash|sh|python[\d.]*|pythonw[\d.]*|py|node|wscript|cscript|conhost|wsl|wt|windowsterminal)\.exe$'
     foreach ($p in $all) {
         if (-not $p.ExecutablePath) { $noPath++ }
+        if ($self.ContainsKey([int]$p.ProcessId)) { $skippedSelf++; continue }
         $kind = $null
         if (Test-UnderRoot $p.ExecutablePath) { $kind = 'root' }
         if (-not $kind) { $kind = Get-RefKind $p.CommandLine }
         if (-not $kind -and -not $p.ExecutablePath -and $script:NameRx -and $script:NameRx.IsMatch('\' + $p.Name)) { $kind = 'name' }
         if (-not $kind) { continue }
-        # Skip this inventory run itself (its command line carries -App).
-        if ($p.ProcessId -eq $PID -or ($p.CommandLine -and $p.CommandLine.Contains($PSCommandPath))) { continue }
+        if ($p.CommandLine -and $PSCommandPath -and $p.CommandLine.Contains($PSCommandPath)) { $skippedSelf++; continue }   # another inventory run
         $script:AppPids[[int]$p.ProcessId] = $p
         $parent = $byPid[[int]$p.ParentProcessId]
         # A parent created after the child is a reused PID, not the real parent.
@@ -599,8 +757,11 @@ Invoke-Section 'processes' {
             key = $k; pid = [int]$p.ProcessId; name = $p.Name; path = $p.ExecutablePath; command_line = $p.CommandLine; match = $kind
             parent_pid = [int]$p.ParentProcessId; parent_name = $(if ($parent) { $parent.Name }); parent_path = $(if ($parent) { $parent.ExecutablePath })
             session = $p.SessionId; threads = $p.ThreadCount; created = $(if ($p.CreationDate) { $p.CreationDate.ToUniversalTime().ToString('o') })
-            machine = $(if ($p.ExecutablePath) { Get-PeMachine $p.ExecutablePath }); modules_from_roots = @(); windows = @() })
+            machine = $(if ($p.ExecutablePath) { Get-PeMachine $p.ExecutablePath }); modules_from_roots = @(); windows = @()
+            # A shell or script host outside the roots that matched only on its command line is usually an analyst helper.
+            helper_suspect = [bool]($kind -ne 'root' -and $p.Name -match $helperRx) })
     }
+    if ($skippedSelf) { $Snap.notes.Add("processes: skipped $skippedSelf processes of this inventory run (its PowerShell, its children and the shells that launched it).") }
     if ($noPath) { $Snap.notes.Add("processes: $noPath of $($all.Count) processes hid their image path (other user, SYSTEM or protected).") }
 
     # Modules: toolhelp snapshot sees 32-bit modules of WOW64 processes too. Needs same user or elevation.
@@ -736,7 +897,7 @@ Invoke-Section 'ifeo' {
                 $k = (Open-Sub $base $n); if (-not $k) { continue }
                 $vals = [ordered]@{}; foreach ($vn in Get-ValNames $k) { $vals[$vn] = Get-RegVal $k $vn }
                 $kind = $null
-                if ($script:ExeNames.ContainsKey($n.ToLowerInvariant())) { $kind = 'name' }
+                if ($script:ExeNames.ContainsKey($n.ToLowerInvariant()) -and $n.ToLowerInvariant() -notmatch $script:RuntimeRx) { $kind = 'name' }
                 elseif ($script:AppRx -and $script:AppRx.IsMatch($n)) { $kind = 'app' }
                 else { foreach ($v in $vals.Values) { if (-not $kind) { $kind = Get-RefKind "$v" } } }
                 $filters = @()
@@ -760,7 +921,8 @@ Invoke-Section 'shell_ext' {
     $containers = '*', 'AllFilesystemObjects', 'Directory', 'Directory\Background', 'Folder', 'Drive', 'DesktopBackground', 'lnkfile'
     $types = 'ContextMenuHandlers', 'DragDropHandlers', 'PropertySheetHandlers', 'CopyHookHandlers', 'IconHandler'
     $classRoots = @(@('HKLM64', 'SOFTWARE\Classes'), @('HKLM32', 'SOFTWARE\Classes'), @('HKCU', 'Software\Classes'))
-    function Test-AppClsid([string]$s) { if (-not $s) { return $false }; $m = [regex]::Match($s, '\{[0-9A-Fa-f-]{36}\}'); $m.Success -and $script:AppClsids.ContainsKey($m.Value.ToUpperInvariant()) }
+    # Tolerates a vendor-mangled value such as '{GUID}-' or '{GUID-}', which still names the app's class.
+    function Test-AppClsid([string]$s) { if (-not $s) { return $false }; $m = [regex]::Match($s, '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'); $m.Success -and $script:AppClsids.ContainsKey('{' + $m.Value.ToUpperInvariant() + '}') }
     foreach ($cr in $classRoots) {
         foreach ($c in $containers) {
             foreach ($t in $types) {
@@ -816,6 +978,61 @@ Invoke-Section 'shell_ext' {
             }
             $base.Close()
         }
+    }
+
+    # Effective state in the merged HKCR view Explorer sees: an HKCU\Software\Classes key overrides the HKLM
+    # one with the same path. Vendors often disable a handler per user by mangling the HKCU CLSID (a trailing
+    # '-'), so the HKLM registration alone says nothing about whether the menu shows.
+    $blocked = @{}
+    foreach ($sc in 'HKLM64', 'HKCU') {
+        $bk = Open-Reg $sc 'SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked'
+        foreach ($n in Get-ValNames $bk) { $blocked[$n.ToUpperInvariant()] = $sc }
+        if ($bk) { $bk.Close() }
+    }
+    function Get-MergedKey([string]$view, [string]$rel) {
+        $hk = Open-Reg 'HKCU' "Software\Classes\$rel"
+        if ($hk) { return @{ key = $hk; source = 'HKCU' } }
+        $lm = $(if ($view -eq '32') { 'HKLM32' } else { 'HKLM64' })
+        $k = Open-Reg $lm "SOFTWARE\Classes\$rel"
+        if ($k) { return @{ key = $k; source = $lm } }
+        $null
+    }
+    function Test-ClsidRegistered([string]$view, [string]$id) {
+        $paths = @(@('HKCU', "Software\Classes\CLSID\$id"))
+        if ($view -eq '32') { $paths += , @('HKCU', "Software\Classes\WOW6432Node\CLSID\$id"); $paths += , @('HKLM32', "SOFTWARE\Classes\CLSID\$id") }
+        else { $paths += , @('HKLM64', "SOFTWARE\Classes\CLSID\$id") }
+        foreach ($p in $paths) { $k = Open-Reg $p[0] $p[1]; if ($k) { $k.Close(); return $true } }
+        $false
+    }
+    $guidRx = '^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$'
+    foreach ($it in (Get-Items 'shell_ext')) {
+        if (-not $it -or -not $it.Contains('container')) { continue }
+        $view = $(if ($it.scope -eq 'HKLM32') { '32' } else { '64' })
+        if ($it.kind -eq 'verb') {
+            $mk = Get-MergedKey $view "$($it.container)\shell\$($it.verb)"
+            if (-not $mk) { $it['effective'] = [ordered]@{ view = $view; source = $null; state = 'absent' }; continue }
+            $flags = @(Get-ValNames $mk.key | Where-Object { $_ -in 'LegacyDisable', 'ProgrammaticAccessOnly', 'Extended' })
+            $dex = Get-RegVal $mk.key 'ExplorerCommandHandler'; $mk.key.Close()
+            $state = 'shown'
+            if ($flags -contains 'Extended') { $state = 'extended-only' }
+            if ($flags -contains 'LegacyDisable' -or $flags -contains 'ProgrammaticAccessOnly') { $state = 'hidden' }
+            if ($dex -and $blocked.ContainsKey("$dex".Trim().ToUpperInvariant())) { $state = 'blocked' }
+            $it['effective'] = [ordered]@{ view = $view; source = $mk.source; flags = $flags; explorer_command_handler = $dex; state = $state }
+            continue
+        }
+        $mk = Get-MergedKey $view "$($it.container)\shellex\$($it.kind)\$($it.handler)"
+        if (-not $mk) { $it['effective'] = [ordered]@{ view = $view; source = $null; state = 'absent' }; continue }
+        $val = Get-RegVal $mk.key ''; $mk.key.Close()
+        $cand = $(if ("$val".Trim()) { "$val".Trim() } else { "$($it.handler)" })
+        $clsid = $null
+        if ($cand -match $guidRx) {
+            $clsid = $cand.ToUpperInvariant()
+            if ($blocked.ContainsKey($clsid)) { $state = 'blocked' }
+            elseif (Test-ClsidRegistered $view $clsid) { $state = 'active' }
+            else { $state = 'unregistered' }
+        } elseif ($cand -match '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}') { $state = 'disabled-mangled' }   # e.g. '{...}-' written by the vendor's own toggle
+        else { $state = 'no-clsid' }
+        $it['effective'] = [ordered]@{ view = $view; source = $mk.source; value = $val; clsid = $clsid; state = $state }
     }
 }
 
@@ -922,11 +1139,21 @@ Invoke-Section 'firewall' {
 }
 
 # ---------------------------------------------------------------- live connections of app processes
+$script:DnsRows = $null
+function Get-DnsRows {
+    if ($null -eq $script:DnsRows) {
+        $script:DnsRows = @()
+        try { $script:DnsRows = @(Get-DnsClientCache -ErrorAction Stop | Where-Object { $_.Data }) }
+        catch { Add-Failure 'dns_cache' 'Get-DnsClientCache' $_.Exception.Message }
+    }
+    ,$script:DnsRows
+}
+function Test-FakeIp([string]$ip) { $ip -match '^198\.(18|19)\.' }   # 198.18.0.0/15: the usual fake-IP range of TUN-mode proxies
+$script:RemoteIps = @{}
 Invoke-Section 'connections' {
     if (-not $script:AppPids.Count) { return }
     $dns = @{}
-    try { foreach ($d in @(Get-DnsClientCache -ErrorAction Stop)) { if ($d.Data) { if (-not $dns[$d.Data]) { $dns[$d.Data] = @() }; if ($dns[$d.Data] -notcontains $d.Entry) { $dns[$d.Data] += $d.Entry } } } }
-    catch { Add-Failure 'connections' 'Get-DnsClientCache' $_.Exception.Message }
+    foreach ($d in (Get-DnsRows)) { if (-not $dns[$d.Data]) { $dns[$d.Data] = @() }; if ($dns[$d.Data] -notcontains $d.Entry) { $dns[$d.Data] += $d.Entry } }
     $seen = @{}
     foreach ($c in @(Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
         $p = $script:AppPids[[int]$c.OwningProcess]; if (-not $p) { continue }
@@ -934,8 +1161,9 @@ Invoke-Section 'connections' {
         $listen = $c.State.ToString() -eq 'Listen'
         $k = $(if ($listen) { "tcp|$img|listen|$($c.LocalAddress):$($c.LocalPort)" } else { "tcp|$img|$($c.RemoteAddress):$($c.RemotePort)" })
         if ($seen.ContainsKey($k)) { continue }; $seen[$k] = 1
+        if (-not $listen -and "$($c.RemoteAddress)" -notmatch '^(0\.0\.0\.0|::|127\.|::1$)') { $script:RemoteIps["$($c.RemoteAddress)"] = $true }
         Add-Item 'connections' ([ordered]@{ key = $k; proto = 'tcp'; pid = [int]$c.OwningProcess; process = $p.Name; state = $c.State.ToString()
-            local = "$($c.LocalAddress):$($c.LocalPort)"; remote = "$($c.RemoteAddress):$($c.RemotePort)"; remote_names = @($dns["$($c.RemoteAddress)"]) })
+            local = "$($c.LocalAddress):$($c.LocalPort)"; remote = "$($c.RemoteAddress):$($c.RemotePort)"; remote_names = @($dns["$($c.RemoteAddress)"] | Where-Object { $_ }) })
     }
     foreach ($u in @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue)) {
         $p = $script:AppPids[[int]$u.OwningProcess]; if (-not $p) { continue }
@@ -944,6 +1172,28 @@ Invoke-Section 'connections' {
         Add-Item 'connections' ([ordered]@{ key = $k; proto = 'udp'; pid = [int]$u.OwningProcess; process = $p.Name; local = "$($u.LocalAddress):$($u.LocalPort)" })
     }
     $Snap.notes.Add('connections: a point-in-time view; use Sysmon events 3/22 or repeated snapshots for anything periodic.')
+}
+
+# ---------------------------------------------------------------- DNS cache: names behind the remote addresses
+Invoke-Section 'dns_cache' {
+    # The resolver cache is machine-wide: a name here was looked up by some process, not necessarily the app.
+    $rows = Get-DnsRows; $fake = 0; $seen = @{}
+    foreach ($d in $rows) {
+        $data = "$($d.Data)"
+        $m = $null
+        if ($script:RemoteIps.ContainsKey($data)) { $m = 'remote' }
+        elseif ($script:AppRx -and ($script:AppRx.IsMatch("$($d.Entry)") -or $script:AppRx.IsMatch("$($d.Name)"))) { $m = 'app' }
+        if (Test-FakeIp $data) { $fake++ }
+        if (-not $m) { continue }
+        $k = "dns|$("$($d.Entry)".ToLowerInvariant())|$data"; if ($seen.ContainsKey($k)) { continue }; $seen[$k] = 1
+        Add-Item 'dns_cache' ([ordered]@{ key = $k; entry = $d.Entry; record_name = $d.Name; type = "$($d.Type)"; data = $data; match = $m })
+    }
+    $fakeRemote = @($script:RemoteIps.Keys | Where-Object { Test-FakeIp $_ }).Count
+    $Snap.coverage['dns_cache_rows'] = $rows.Count
+    $Snap.notes.Add('dns_cache: a proxy in TUN or fake-IP mode hides the real hosts; connections then point at the proxy (often 198.18.0.0/15) and the cache can hold fake addresses. Use the proxy''s own connection log or Sysmon event 22 for real host names.')
+    if ($fake -or $fakeRemote) {
+        $Snap.notes.Add("dns_cache: $fake cache entries and $fakeRemote remote addresses are in 198.18.0.0/15; a TUN-mode proxy is probably active, so remote addresses here are not the vendor's hosts.")
+    }
 }
 
 # ---------------------------------------------------------------- toast AUMIDs
@@ -1041,8 +1291,32 @@ Invoke-Section 'appx' {
 
 # ---------------------------------------------------------------- optional Sysinternals autorunsc
 Invoke-Section 'autoruns' {
-    $exe = Get-Command autorunsc64.exe, autorunsc.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $exe) { $Snap.notes.Add('autoruns: autorunsc not on PATH; native queries only.'); return }
+    # Same lookup as setup_re_backend.ps1 -Doctor: per name, PATH first, then the Sysinternals folder it installs.
+    $names = $(if ([Environment]::Is64BitOperatingSystem) { 'autorunsc64.exe', 'autorunsc.exe' } else { 'autorunsc.exe' })
+    $dirs = @((Join-Path $env:LOCALAPPDATA 'Programs\Sysinternals'))
+    $exePath = $null
+    if ($AutorunsPath) {
+        if (Test-Path -LiteralPath $AutorunsPath -PathType Leaf) { $exePath = (Resolve-Path -LiteralPath $AutorunsPath).ProviderPath }
+        elseif (Test-Path -LiteralPath $AutorunsPath -PathType Container) { $dirs = @((Resolve-Path -LiteralPath $AutorunsPath).ProviderPath) }
+        else { Add-Failure 'autoruns' $AutorunsPath '-AutorunsPath does not exist'; return }
+    }
+    if (-not $exePath) {
+        foreach ($n in $names) {
+            if (-not $AutorunsPath) {
+                $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($c) { $exePath = $c.Source; break }
+            }
+            foreach ($d in $dirs) { $f = Join-Path $d $n; if (Test-Path -LiteralPath $f -PathType Leaf) { $exePath = $f; break } }
+            if ($exePath) { break }
+        }
+    }
+    if (-not $exePath) { $Snap.notes.Add('autoruns: autorunsc not found on PATH, in %LOCALAPPDATA%\Programs\Sysinternals or via -AutorunsPath; native queries only. setup_re_backend.ps1 -Install -Component sysinternals installs it.'); return }
+    $sig = Get-AuthenticodeSignature -LiteralPath $exePath
+    if ($sig.Status -ne 'Valid' -or "$($sig.SignerCertificate.Subject)" -notmatch 'Microsoft Corporation') {
+        Add-Failure 'autoruns' $exePath "not run: signature $($sig.Status), signer '$($sig.SignerCertificate.Subject)'"; return
+    }
+    $exe = [pscustomobject]@{ Source = $exePath }
+    $Snap.coverage['autoruns_exe'] = $exePath
     $eula = Open-Reg 'HKCU' 'Software\Sysinternals\Autoruns'; $accepted = (Get-RegVal $eula 'EulaAccepted') -eq 1; if ($eula) { $eula.Close() }
     if (-not $accepted -and -not $AutorunsAcceptEula) { $Snap.notes.Add('autoruns: EULA not yet accepted; rerun with -AutorunsAcceptEula (writes the Sysinternals EULA flag).'); return }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoruns-" + [guid]::NewGuid().ToString('N') + '.csv')
@@ -1066,6 +1340,18 @@ Invoke-Section 'autoruns' {
 # ---------------------------------------------------------------- write
 $outFull = [IO.Path]::GetFullPath($Out)
 $dir = Split-Path $outFull -Parent; if (-not (Test-Path -LiteralPath $dir)) { throw "Output directory does not exist: $dir" }
+function Repair-EmptyKeys($node, [int]$depth) {
+    # Windows PowerShell 5.1 ConvertFrom-Json rejects an empty property name ("Invalid object passed in"),
+    # e.g. a registry default value or an extensionless file count, so every empty key becomes "(none)".
+    if ($null -eq $node -or $depth -gt 24 -or $node -is [string]) { return }
+    if ($node -is [Collections.IDictionary]) {
+        foreach ($k in @($node.Keys | Where-Object { [string]::IsNullOrEmpty([string]$_) })) { $v = $node[$k]; $node.Remove($k); $node['(none)'] = $v }
+        foreach ($k in @($node.Keys)) { Repair-EmptyKeys $node[$k] ($depth + 1) }
+    } elseif ($node -is [Collections.IEnumerable]) {
+        foreach ($x in $node) { Repair-EmptyKeys $x ($depth + 1) }
+    }
+}
+Repair-EmptyKeys $Snap 0
 $json = $Snap | ConvertTo-Json -Depth 12
 if (-not $KeepPaths) {
     $esc = $env:USERPROFILE.TrimEnd('\').Replace('\', '\\')

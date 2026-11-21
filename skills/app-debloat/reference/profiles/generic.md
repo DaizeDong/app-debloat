@@ -1,8 +1,8 @@
-# Profiles: how to pick one
+# Profiles: How to Pick One
 
 A profile encodes what is DIFFERENT for one kind of app: where the junk lives, how it comes back, what gates it, what is core, which levers are safe, and how to prove core function still works. The pipeline (P0 to P7) is the same for every app; the profile only changes the answers to the per-app checkpoints. Load exactly one primary profile at P0, plus at most one secondary profile when the app straddles two kinds (for example a netdisk client built on Electron).
 
-## Decision table (P0)
+## Decision Table (P0)
 
 Answer in order; the first match is the primary profile.
 
@@ -13,8 +13,9 @@ Answer in order; the first match is the primary profile.
 | Talks to device firmware or a vendor ACPI/WMI driver (fan, power mode, keyboard light, battery limit), or was preinstalled by the PC maker | `oem-utility.md` |
 | Cloud drive or download manager (sync engine, transfer queue, browser hand-off protocol) | `netdisk-downloader.md` |
 | Office or PDF suite (document editor, file associations, cloud docs namespace) | `office-suite.md` |
+| Ships a whole Chromium browser under its own brand: `<version>\` folder beside the exe, `chrome_elf.dll`, `User Data\Local State` (Quark 7.x) | `chromium-fork.md` |
 | Main window is Chromium: `resources\app.asar`, `*.pak` + `libcef.dll`, `app-update.yml`, Squirrel `Update.exe` | `electron-cef-app.md` |
-| None of the above | this file, section "No profile fits" |
+| None of the above | this file, section "No Profile Fits" |
 
 Secondary profile: if the primary is netdisk, office, IM or OEM and the UI is Electron/CEF, also read `electron-cef-app.md` for the updater and resource gates. Record both in the analysis ledger.
 
@@ -31,7 +32,7 @@ Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\CTF\TIP' | ForEach-Object { (Get-ItemPro
 Get-ChildItem -LiteralPath $root -Recurse -Filter *.exe | ForEach-Object { (Get-AuthenticodeSignature -LiteralPath $_.FullName).SignerCertificate.Subject } | Sort-Object -Unique
 ```
 
-## What every profile states, and what the pipeline does with it
+## What Every Profile States, and What the Pipeline Does With It
 
 | Profile section | Feeds pipeline step |
 |---|---|
@@ -49,7 +50,7 @@ Risk tiers used by every profile:
 - **normal**: in-install-dir changes allowed (placeholders, ACL on vendor files), after the integrity probe passed.
 - **out-of-process only**: no file in the install root is renamed, replaced, patched or ACL-locked; only services, tasks, IFEO on helper names, firewall rules by program path, updater staging dirs outside the install root, and vendor settings. Mandatory for account-bound apps with a documented ban history (Tencent IM) and whenever the integrity probe shows a self-check, self-repair or forced logout.
 
-## Lever order (shared by all profiles)
+## Lever Order (Shared by All Profiles)
 
 Least likely to be flagged or reverted first:
 
@@ -62,9 +63,9 @@ Least likely to be flagged or reverted first:
 
 Never in any profile: binary patching, redistributing modified installers, extracted keys or decrypted configs in the public repo, hosts entries for shared CDNs or Microsoft domains, `sc delete`, disabling Defender, killing processes by name.
 
-## No profile fits
+## No Profile Fits
 
-Treat the app as unknown and derive the profile answers yourself during P1 to P3. Typical cases: download accelerators (Thunder/Xunlei), image viewers and compressors from portal vendors (2345 family), translation clients (Youdao Dictionary), driver-update utilities, game launchers.
+Treat the app as unknown and derive the profile answers yourself during P1 to P3. Typical cases: download accelerators (Thunder/Xunlei), image viewers and compressors from portal vendors (2345 family), translation clients (Youdao Dictionary; see "Translation Clients" below), driver-update utilities, game launchers.
 
 Checklist for an unknown app:
 
@@ -84,6 +85,26 @@ Example sources for this bucket (hypotheses only):
 - Persistence inventory: https://learn.microsoft.com/en-us/sysinternals/downloads/autoruns and https://github.com/last-byte/PersistenceSniper
 - Ad and tracker domain seeds (hypotheses, never pasted into hosts): https://github.com/privacy-protection-tools/anti-AD
 
-## Out of scope for every profile
+## Translation Clients
+
+Notes from one run on a Youdao Dictionary desktop build; unverified for other versions and other vendors, and they contain no keys.
+
+- Per-user install under `%LOCALAPPDATA%` with no services; everything it needs to update itself runs as the user, without UAC.
+- The data dir may be spelled differently from the product name (Youdao uses `Yodao`), so search both spellings, for example `-App 'Youdao|Yodao'`.
+- The updater stages a new version in a timestamped folder (`updaters\<timestamp>`) and swaps it in later; an interrupted swap can leave the app unable to start (`pipeline.md` P0 step 6).
+- The AI helper lives in its own folder (`Application\Stable`) and is started by the main client.
+- The installer may rewrite the AppUserModelID of Start Menu and Desktop shortcuts, including other apps' shortcuts. That is a write outside its own roots (`pipeline.md` P3).
+- Ads and AI prompts are drawn in-process from server config; see the next section.
+
+## Remote Config Popups
+
+Many popups, promotion tabs and AI prompts are switched on by a config the app downloads at start, not by any local file.
+
+- **Find the key**: capture the config response or its cache in the user data dir, note when and where the popup appears, and match its URL, text, campaign ID or interval (for example a minimum-hours-between-popups field set to 0) against the config keys. Confirm with one toggle test before writing it in the ledger as a gate.
+- **Editing the cache is not durable**: the next fetch overwrites it, and some apps verify it. Do not plan an action on the cache; at most record it as an inferred gate.
+- **Durable options**: an in-app switch that the config honors, a per-binary firewall rule when the config comes from a helper exe (not the main exe), or network-level blocking of the config host. Network-level blocking (router, DNS filter or proxy rule) is the owner's opt-in and lives outside the script; vendor config hosts are often shared with core features.
+- **Otherwise it is a residual**: `plan.md` section 5 names the config source, the popups it drives, and the probe that shows them.
+
+## Out of Scope for Every Profile
 
 Uninstalling the app, recommending a replacement app, cracking or bypassing paid tiers, malware cleanup, browser ad blocking, Windows-wide debloat. Where a profile mentions a community alternative (for example an open-source replacement for an OEM utility), it is a note for the owner, not a lever the skill applies.

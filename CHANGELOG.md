@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here (Keep a Changelog style).
 
+## [0.1.3] - 2026-11-21
+### Changed
+- Improvements from the first live runs: Toolhelp32 module check by full path (32-bit included), ini-set and json-set actions, core.preserve, Options Not Selected in dry runs, root provenance and identity in the header; inventory fixes (autorunsc lookup, -AppFile, runtime-name exclusion, per-root caps, DNS cache, pending updates); snapshot_diff --out/--summary; new shot_windows, launch_monitor, stop_app, elevated_readonly and frida file/stack tracers; pipeline steps for half-applied updates, first-launch self-update and UAC handling; chromium-fork profile and Baidu 8.x notes.
+
 ## [0.1.2] - 2026-11-21
 ### Changed
 - Reject malformed version.sources at build time and warn when no version resolves; pe_triage works under python -I by adding the user site-packages.

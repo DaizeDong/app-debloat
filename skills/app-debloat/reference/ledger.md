@@ -50,6 +50,20 @@ for RI. `depends_on` lists the entries this one builds on.
 
 Add a kind only when none of these fit, and document it at the top of the ledger.
 
+A negative finding takes the kind of the claim it refutes, with status `negative`; there is no
+separate kind for it. "No popup appeared during an idle hour" is an `EDGE` (or `NET`, if the check
+was for traffic) with status `negative`; "no scheduled task references the root" is an `INV` with
+status `negative`; a block that did not hold is a `VER` with status `negative`. Its anchors are the
+search or test performed and its coverage.
+
+```json
+{"id": "L-EDGE-007", "kind": "EDGE", "claim": "No PopNews.exe window or process during a 60-minute idle session.",
+ "from": "ExampleApp.exe", "to": "PopNews.exe", "status": "negative", "app_version": "2.3.1",
+ "anchors": [{"type": "log", "source": "launch_monitor.ps1 idle-60m.json", "time": "2026-01-15T10:00Z/11:00Z",
+              "line": "0 process starts under {root}; 0 new top-level windows"}],
+ "created": "2026-01-15", "notes": "coverage: one idle session, not elevated, no server-side popup window in that hour"}
+```
+
 ## Status
 
 | Status | Meaning | Minimum anchor |
@@ -88,6 +102,18 @@ with `when`); it never upgrades it. The engine refuses a schema 2 manifest whose
   promoted and the plan and manifest are regenerated.
 - `negative` entries never justify an action; they justify leaving something alone.
 - When a ledger entry is demoted or marked `stale`, every action that cites it drops with it.
+- Tolerance is verified, not evidence. Whether the app keeps running without the blocked file (a
+  placeholder updater, a renamed helper, an emptied plugin folder) is a P6 verification item: it
+  goes in the action's `verify` line and ends as a `VER` entry. An open tolerance question does not
+  demote the action; its status still comes from the `EDGE`, `GATE` and `RI` entries that justify
+  it. When P6 shows the app does not tolerate the block, record a `VER` with status `negative` and
+  change or drop the action. An action that touches a component an `L-CORE` entry depends on still
+  needs that contract's probe.
+- Owner choices keep their evidence. When the owner asks for an option to be passed at apply (for
+  example "block the updater tasks" on an `inferred` action), the plan lists it as `owner choice`,
+  and the action keeps its evidence status unchanged in the plan, the manifest and the ledger. The
+  choice is the owner's decision, not a promotion; it does not make the action a default for anyone
+  else, and the probe that would promote it stays written next to the option.
 
 ## Anchor types
 
@@ -145,7 +171,13 @@ justify it, the copied status, and the check that proves it:
 A-04  Block PopNews.exe by placeholder directory plus deny-write ACL
       because: L-EDGE-003 (observed), L-RI-004 (observed)   status: observed   default
       core impact: none (L-CORE-001 does not depend on it)
-      verify:  process absent after login and after the repair trigger in L-RI-004 -> record L-VER-007
+      verify:  process absent after login and after the repair trigger in L-RI-004;
+               ExampleApp.exe starts and L-CORE-001 passes without PopNews.exe (tolerance) -> record L-VER-007
+
+A-06  Disable the AcmeCorp updater tasks
+      because: L-RI-005 (inferred: task names only, SYSTEM tasks not readable unelevated)
+      status: inferred   option -DisableUpdaterTasks   owner choice (passed at apply on the owner's request)
+      promote by: elevated task export showing the action runs UpdHelper.exe
 ```
 
 Rules for the plan:
@@ -168,5 +200,9 @@ Rules for the plan:
 | `pe_triage.py` `flagged_imports[].call_sites` | `pe` anchor for the API side of an EDGE |
 | `pe_triage.py` `strings[].xrefs`, `table_xrefs`, `top_functions[].callers` | `xref` anchor linking the target name or switch to the call site |
 | `pe_triage.py` `top_functions[].rea` | `decompile` anchor (supporting) |
+| `inventory.ps1` `pending_update` (`.new`/`.old` siblings, swaps, staged packages, Uninstall version different from the file version) | `RI` entry for the vendor's own update path; settle it before P1 |
+| `inventory.ps1` `dns_cache`, `connections[].remote_names` | `NET` anchor (`net` type, source `dns_cache`); the cache is machine-wide and a TUN-mode proxy hides real hosts, so a name from it is at most `inferred` until Sysmon 22 or a proxy log ties it to the process |
+| `inventory.ps1` `shell_ext[].effective` | `INV` or `GATE` anchor for whether a handler is active for this user (HKCU overrides HKLM in the merged view) |
 | `snapshot_diff.py` added or changed items after a trigger | `RI` (what came back) or `VER` (what held) with two `snapshot` anchors |
-| `snapshot_diff.py` `fingerprint_changes` | mark affected entries `stale` and rerun inventory and triage |
+| `snapshot_diff.py` `fingerprint_changes` (with `changed_files`, `removed_files`, `added_files`) | mark affected entries `stale` and rerun inventory and triage; a change caused by launching the app itself (a swap or cleanup) is an `RI` entry of its own |
+| `snapshot_diff.py` `capped` on a file category | no add/remove evidence for that root; rerun with a higher `-MaxFiles` or diff the specific files |

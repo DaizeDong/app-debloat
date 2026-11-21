@@ -1,0 +1,77 @@
+# Pipeline: P4 to P7
+
+Continues `pipeline.md` (evidence rules and the read-only stages P0 to P3). Same conventions: every stage writes to the private ledger before the next one starts; "unknown" is allowed, blank is not.
+
+## Elevation
+
+Several steps need Administrator: the elevated read-only bundle at P0, `-Apply`, `-Install`, `-Uninstall`, and some P6 checks. A UAC prompt nobody answers times out after about two minutes and reads as "canceled by the user".
+
+1. Ask for elevation only when the owner is present, and batch the elevated work so one prompt covers it (P0: `scripts/elevated_readonly.ps1`; P6: apply plus its checks).
+2. If UAC is declined or times out, retry at most once.
+3. Then stop after the dry run. Write the exact elevated command block into `verification.md` (working directory, script path, mode switches, option switches, where its output goes) so the owner can paste it into an elevated terminal, and mark every elevated step `proposed`, not `performed`.
+
+Never work around a declined prompt (no scheduled task as SYSTEM, no other elevation trick).
+
+## P4 Plan
+
+Goal: a reviewed `plan.md` with the five mandatory sections of `reference/plan-template.md`: core preservation, targeted levers, durability, reversibility, feasibility and honesty.
+
+Steps:
+1. Label every component: core, ad, AI, telemetry, updater, repair, unknown. Unknown stays untouched.
+2. Choose levers from `reference/levers.md`, least-flagged and narrowest first. Prefer disable over delete, block over patch, per-binary over machine-wide.
+3. For each action write: target, lever, evidence IDs and copied status, default or named option, original state and ownership, undo with its conflict rule, verify check, and whether `-Install` may re-assert it (only blocking actions).
+4. Map every `L-RI` path to a control and a reapply trigger; state version and path drift handling.
+5. Get the owner's consent for account-bound apps before anything in-tree is planned.
+
+Checkpoints (ledger section `P4`):
+- What looks like bloat but is core: helpers that carry dictionary sync, hotkeys, fan or EC control, the main window's host, cloud candidate engines. Each "keep" gets a reason; leaving a component alone is a valid outcome.
+- Does this app tolerate in-tree changes (P0 tier)? If not, only services, tasks, firewall, IFEO and external config.
+- Is any default action `inferred` or `hypothesis`? Move it behind an option. Options the owner chooses to pass at apply are listed as "owner choice" with their evidence status unchanged. Does any sentence promise complete blocking without a `VER` entry? Reword it.
+- Does blocking an updater freeze a browser engine or a network-facing component? Then section 5 states the security-update cost.
+- Checks are split into proposed and performed.
+
+Exit: `plan.md` passes the template checklist and is approved by the owner where consent is required.
+Artifacts: `plan.md` (private).
+
+## P5 Build Script
+
+Goal: one idempotent PowerShell script for the app.
+
+Steps:
+1. Write the plan as a manifest (`reference/manifest.md`): actions with targets, levers, evidence IDs, the copied evidence status and reapply flags, not ad hoc code. Paths use the `{root}` token. Settings files use `ini-set` or `json-set`; files that must survive but may be edited by those actions go in `core.preserve`, files nothing may touch in `core.files`. `inferred` and `hypothesis` actions get a `when` option and are off by default. App-specific logic (for example a config codec) goes into a hooks file as clearly named scriptblocks.
+2. Build the single-file script: dot-source `scripts/DebloatEngine.ps1`, then `New-AppScript -ManifestPath <manifest.json> -HooksPath <hooks.ps1> -OutFile <App>Debloat.ps1 -EnginePath <path to DebloatEngine.ps1>`. It inlines the engine (path guard, placeholder, IFEO, Blocked, ACL, service, task, firewall, ini and json settings, journal, preboot task, install and uninstall), the manifest and the hooks into `templates/app-debloat.template.ps1`, so users download one file.
+3. Modes: dry run by default (prints the plan, changes nothing), `-Apply` (exactly the printed plan, journals original state on first touch), `-Install` (admin-only state dir, logon plus 6-hourly task, applies once), `-Uninstall` (removes what it registered, replays the journal). Exactly one mode switch per run.
+4. Save as UTF-8 with BOM, target Windows PowerShell 5.1.
+5. Run the dry run as the user. If `-Apply` cannot be elevated, follow the elevation rule above and stop here.
+
+Exit: dry run on the target machine prints the expected plan; a second `-Apply` reports only SKIP (or the elevated command block is handed over).
+Artifacts: `<app>-debloat.ps1`.
+
+## P6 Verify
+
+Goal: prove by behavior that bloat is gone and the contract holds.
+
+Steps:
+1. Before and after: process tree, loaded modules per host, outbound connections (Sysmon 3 and 22, `scripts/launch_monitor.ps1`, or a live snapshot).
+2. Screenshots of the app's own windows with `scripts/shot_windows.ps1 -Root <root> -Out <private dir>` (DPI-aware PrintWindow, no input sent). Never photograph the whole desktop.
+3. Run every contract probe. Keystroke probes go only into a window the agent created; verify foreground and read back committed text (see `safety.md`).
+4. Reboot and repeat. Then trigger the app's own repair or update path once and repeat.
+5. Delayed re-read after a few minutes and after reboot: IFEO, Blocked and ACL changes still present (AV may revert them).
+6. Run the script again: it must report SKIP for everything.
+
+When elevation was not available, P6 records only what ran as the user and lists the rest under `Proposed checks` next to the handed-over command block.
+
+Exit: contract passes after reboot, no bloat process or module, no unexpected changes reverted.
+Artifacts: `verification.md` (private) with timestamps, counts, screenshots and probe results.
+
+## P7 Keep Applied
+
+Goal: survive upgrades and repairs without repeating destructive work.
+
+Steps:
+1. Install only after P6 passes. The scheduled task runs `-Auto` (logged `-Apply`) at logon and every 6 hours, re-asserting blocking actions only.
+2. Store a version fingerprint (product version plus hashes of key binaries). On an unknown version or a changed fingerprint, version-bound actions stay inactive unless the owner passed an explicit force choice; the run logs a warning and says P1 to P3 should be re-run.
+3. Never auto-update the script from the network; re-run `-Install` for a new release.
+
+Exit: task registered, first automatic run logged clean.
+Artifacts: auto log and per-run history line in the state dir; ledger entry with the fingerprint.

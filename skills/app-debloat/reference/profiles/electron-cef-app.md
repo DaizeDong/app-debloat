@@ -1,15 +1,15 @@
-# Profile: Electron and CEF desktop apps
+# Profile: Electron and CEF Desktop Apps
 
-Apps whose UI is Chromium: Electron (`resources\app.asar`, `app-update.yml` or Squirrel `Update.exe`) or CEF (`libcef.dll`, `*.pak`, a vendor host exe). Often the secondary profile for a netdisk, IM or office app. The Quark netdisk client is the reference case for updater drift.
+Apps whose UI is Chromium: Electron (`resources\app.asar`, `app-update.yml` or Squirrel `Update.exe`) or CEF (`libcef.dll`, `*.pak`, a vendor host exe). Often the secondary profile for a netdisk, IM or office app. Older Electron-based Quark netdisk builds are the reference case for updater drift; Quark 7.x is a Chromium fork, see `chromium-fork.md`. Baidu Netdisk 8.x uses an Electron UI (`netdisk-downloader.md`).
 
-## Architecture and where the junk lives
+## Architecture and Where the Junk Lives
 
 - **Main process plus Chromium children** (`--type=renderer`, `gpu-process`, `utility`). Children are core; never block by the main exe name because children share it.
 - **App code** in `resources\app.asar` (Electron) or vendor `*.pak` / zip resources (CEF). Ads, banners, AI side panels, "recommended" tabs and promo windows are usually just JS/HTML views and remote URLs loaded at runtime, so most junk is in the same process as core UI.
-- **Native helpers** next to the main exe: updater, crash reporter, a tray or "assistant" exe, a second updater for a bundled product (Quark ships a `QianwenUpdater` in some builds, unverified per version), shell extension DLLs, a protocol handler.
+- **Native helpers** next to the main exe: updater, crash reporter, a tray or "assistant" exe, a second updater for a bundled product (some builds of vendor suites ship one per product, unverified per version), shell extension DLLs, a protocol handler.
 - **Install scope**: per-user installs under `%LOCALAPPDATA%\Programs\<app>` or `%LOCALAPPDATA%\<app>` can be rewritten by the app without UAC. Machine-wide installs under `%ProgramFiles%` need an elevated updater or a service.
 
-## Launch, persistence and re-install vectors
+## Launch, Persistence and Re-Install Vectors
 
 | Vector | Where to look | Proof it is blocked |
 |---|---|---|
@@ -20,17 +20,17 @@ Apps whose UI is Chromium: Electron (`resources\app.asar`, `app-update.yml` or S
 | Startup | Run key, Startup folder shortcut, scheduled task named after the app | autorunsc diff clean |
 | Shell integration | Context menu handlers, `Explorer\MyComputer\NameSpace` and `Desktop\NameSpace` entries, file associations re-taken on update | Explorer shows none after reboot |
 
-Staging paths drift between versions (Quark moved its update path between v2.6.5 and v4.1.7: https://www.52pojie.cn/thread-2056012-1-1.html). Never hard-code: resolve the staging dir from the updater config, the strings in the updater, or a Procmon capture of one real check.
+Staging paths drift between versions (the Electron-based Quark client moved its update path between v2.6.5 and v4.1.7: https://www.52pojie.cn/thread-2056012-1-1.html). Never hard-code: resolve the staging dir from the updater config, the strings in the updater, or a Procmon capture of one real check.
 
 ## Gates
 
-- **`app-update.yml`**: the electron-updater feed. Pointing `url` at an unreachable loopback address is the common community lever for Quark 3.x (below). It is a file in the install dir, so it needs the normal risk tier, and an update or repair rewrites it.
-- **Local settings**: `%APPDATA%\<app>\` JSON or LevelDB (`Local Storage\leveldb`), `Preferences`, and vendor ini. Look for `autoUpdate`, `autoLaunch`, `floatBall`, `takeOverBrowser`, `showInMyComputer` keys. Prefer the vendor setting when it is persisted and honored after restart.
-- **Remote config**: feature flags fetched at start (often JSON from a config host). Junk that appears without any local change is server-driven; only behavior probes and network-level blocks touch it.
+- **`app-update.yml`**: the electron-updater feed. Pointing `url` at an unreachable loopback address is the common community lever for the Electron-based Quark 3.x (below). It is a file in the install dir, so it needs the normal risk tier, and an update or repair rewrites it.
+- **Local settings**: `%APPDATA%\<app>\` JSON or LevelDB (`Local Storage\leveldb`), `Preferences`, and vendor ini. Plain JSON and ini files are set with the engine's `json-set` and `ini-set` actions while the app is closed. Look for `autoUpdate`, `autoLaunch`, `floatBall`, `takeOverBrowser`, `showInMyComputer` keys. Prefer the vendor setting when it is persisted and honored after restart.
+- **Remote config**: feature flags fetched at start (often JSON from a config host). Junk that appears without any local change is server-driven; only behavior probes and network-level blocks touch it (see `generic.md`, "Remote Config Popups").
 - **ASAR integrity**: Electron can verify `app.asar` header hashes at startup and terminate on mismatch. Windows support from Electron 30 when the `EnableEmbeddedAsarIntegrityValidation` fuse is on; usually paired with `OnlyLoadAppFromAsar`. Read the fuses with `npx @electron/fuses read --app <exe>` (read-only). Even when the fuse is off, editing `app.asar` is a binary patch for our purposes.
 - **Update signature check**: electron-updater verifies Authenticode of downloaded NSIS updates against `publisherName` in `app-update.yml`. Not a lever; it means a spoofed feed will not install anything, so a dead feed is enough.
 
-## Core: do not touch
+## Core: Do Not Touch
 
 - The main exe, all Chromium child processes, `resources\app.asar` / `*.pak`, `libcef.dll` / `ffmpeg.dll` / ICU data.
 - The protocol handler if a core flow needs it (netdisk "open in client" from the browser).
@@ -56,13 +56,13 @@ Avoid:
 - Blocking shared CDNs in hosts.
 - Running an old version offline as the plan; version pinning is the owner's choice, not a lever.
 
-## Integrity, anti-tamper and ban risk
+## Integrity, Anti-Tamper and Ban Risk
 
 - Tier normally "normal" for accountless or low-risk accounts; netdisk and IM accounts follow their own profile.
 - Integrity probe: rename a non-critical file in `resources` (for example a locale `.pak` the owner does not use), start, observe self-check, repair download or refusal, restore.
 - ASAR integrity fuse on: anything inside `app.asar` is off limits even in the normal tier.
 
-## Verification probes
+## Verification Probes
 
 - App starts, main window renders, login state survives restart (no forced re-login).
 - The core flow from the contract works end to end (see the domain profile: list/upload/download for a netdisk, send-to-self for IM).
@@ -70,9 +70,9 @@ Avoid:
 - Reboot: no autostart unless the contract keeps it; no tray widget; Explorer namespace gone.
 - Process tree after 10 minutes idle: only main plus Chromium children plus contract-approved helpers.
 
-## Public projects and recipes
+## Public Projects and Recipes
 
-- Quark netdisk 3.x update block (point `app-update.yml` `url` at loopback, make `%LOCALAPPDATA%\quark-cloud-drive-updater` read-only or replace `pending` with a file; install offline first): https://meta.appinn.net/t/topic/72072, https://blog.csdn.net/lingzhentaor/article/details/148290929, https://www.mydigit.cn/thread-536690-1-1.html (community, version-specific, unverified on 4.x and later).
+- Quark netdisk 3.x update block (point `app-update.yml` `url` at loopback, make `%LOCALAPPDATA%\quark-cloud-drive-updater` read-only or replace `pending` with a file; install offline first): https://meta.appinn.net/t/topic/72072, https://blog.csdn.net/lingzhentaor/article/details/148290929, https://www.mydigit.cn/thread-536690-1-1.html (community, version-specific, unverified on 4.x and later; does not apply to Quark 7.x, which is a Chromium fork: `chromium-fork.md`).
 - Quark staging path drift between versions: https://www.52pojie.cn/thread-2056012-1-1.html
 - Electron ASAR integrity and fuses: https://www.electronjs.org/docs/latest/tutorial/asar-integrity and https://www.electron.build/docs/tutorials/adding-electron-fuses/
 - electron-updater update signature verification: https://www.electron.build/docs/features/security

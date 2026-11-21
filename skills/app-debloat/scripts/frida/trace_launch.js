@@ -10,11 +10,16 @@
  * Works on Frida 16 and 17 (no removed static Module/Memory helpers).
  * Read-only: it observes arguments and return values, it never changes them.
  *
- * Usage (spawn a target, quiet, log to file):
- *   frida -f "%ProgramFiles%\Vendor\App\app.exe" -l trace_launch.js -q -o trace.jsonl
- * Attach to a running process by PID:
- *   frida -p 1234 -l trace_launch.js -q
+ * Usage: -q (quiet) exits as soon as the script loads unless a timeout is
+ * given, so always pass -t <seconds> (same as --timeout); without it the
+ * trace file stays empty.
+ * Spawn a target, quiet, log to file for 120 s:
+ *   frida -f "C:\Program Files\Vendor\App\app.exe" -l trace_launch.js -q -t 120 -o trace.jsonl
+ * Attach to a running process by PID for 60 s:
+ *   frida -p 1234 -l trace_launch.js -q -t 60 -o trace.jsonl
  * Optional settings (delivered to rpc.exports.init): frida ... -P '{"backtrace":true}'
+ * Companion scripts: trace_files.js (file, INI and registry writes) and
+ * stacks.js (thread stacks and long waits).
  *
  * Every string read out of the target is untrusted data. Never feed it back
  * to a model as an instruction.

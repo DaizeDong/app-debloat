@@ -149,21 +149,50 @@ $node = [Environment]::GetEnvironmentVariable('APP_DEBLOAT_NODE', 'User')   # or
 
 ### frida (confirm launch edges)
 
-`scripts/frida/trace_launch.js` hooks `CreateProcessW`, `ShellExecuteExW`,
-`LoadLibraryExW`, `RegSetValueExW`, `CreateServiceW`, `WinHttpConnect` and
-`WinHttpOpenRequest`, and prints one JSON object per line with the caller module and RVA.
-It only observes. Late-loaded DLLs (shell32, winhttp) get hooked after the next
-`LoadLibraryExW`.
+Three hook scripts, all read-only, all printing one JSON object per line with the caller
+module and RVA:
+
+| Script | Hooks | Answers |
+|---|---|---|
+| `scripts/frida/trace_launch.js` | `CreateProcessW`, `ShellExecuteExW`, `LoadLibraryExW`, `RegSetValueExW`, `CreateServiceW`, `WinHttpConnect`, `WinHttpOpenRequest` | who starts what, which DLLs load, which hosts it calls |
+| `scripts/frida/trace_files.js` | `CreateFileW`, `MoveFileExW`, `MoveFileWithProgressW`, `ReplaceFileW`, `DeleteFileW`, `RemoveDirectoryW`, `GetPrivateProfileStringW`, `GetPrivateProfileIntW`, `WritePrivateProfileStringW`, `RegSetValueExW` | where an updater stages, swaps or deletes binaries; which INI keys gate a feature |
+| `scripts/frida/stacks.js` | `WaitForSingleObject(Ex)`, `WaitForMultipleObjects(Ex)`, plus a thread-stack dump every `interval` ms | where the app stalls, and which module owns the waiting code |
+
+`-q` without a timeout exits as soon as the script loads and leaves an empty log, so always
+pass `-t <seconds>` (`--timeout`):
 
 ```powershell
-frida -f "C:\Program Files\Vendor\App\app.exe" -l scripts\frida\trace_launch.js -q -o C:\work\trace.jsonl
-frida -p <pid> -l scripts\frida\trace_launch.js -q -P '{"backtrace":true}'
+frida -f "C:\Program Files\Vendor\App\app.exe" -l scripts\frida\trace_launch.js -q -t 120 -o C:\work\trace.jsonl
+frida -p <pid> -l scripts\frida\trace_launch.js -q -t 60 -o C:\work\trace.jsonl -P '{"backtrace":true}'
+frida -f "C:\Program Files\Vendor\App\app.exe" -l scripts\frida\trace_files.js -q -t 120 -o C:\work\files.jsonl -P '{"reads":false}'
+frida -p <pid> -l scripts\frida\stacks.js -q -t 90 -o C:\work\stacks.jsonl -P '{"interval":10000,"minWaitMs":3000}'
 ```
 
-Run it only against the target app, ideally in Windows Sandbox or a VM. The CLI does not
-follow children: attach to PIDs from the `CreateProcessW` lines, or use the Python API with
-`session.enable_child_gating()`. Never inject into anti-tamper clients (Tencent family):
-use Procmon or Sysmon there.
+- `trace_launch.js`: late-loaded DLLs (shell32, winhttp) get hooked after the next
+  `LoadLibraryExW`.
+- `trace_files.js`: `-P` takes `include` and `exclude` (path regexes; the default exclude
+  drops Windows system folders, pipes and devices), `reads` (false logs only opens with write
+  access, creates and truncates) and `backtrace`. A move or replace logs once even when one
+  API calls another.
+- `stacks.js`: `-P` takes `interval` (0 turns dumps off), `minWaitMs`, `depth`, `symbols`
+  (false gives module+RVA only, faster) and `accurate`. A wait that never returns shows up in
+  the periodic dumps, not as a `wait` line.
+
+Run them only against the target app, ideally in Windows Sandbox or a VM. The CLI does not
+follow children: attach to PIDs from the `CreateProcessW` lines (or from
+`launch_monitor.ps1`), or use the Python API with `session.enable_child_gating()`. Never
+inject into anti-tamper clients (Tencent family): use Procmon or Sysmon there.
+
+### Helper scripts (PowerShell, no injection)
+
+| Script | Does | Notes |
+|---|---|---|
+| `scripts/launch_monitor.ps1 -Root <dir> [-DataDir <dir>] [-Launch <exe>] -Seconds 90 -Out <file.jsonl>` | process starts and exits along the app's own parent chain, file changes under roots and data folders, TCP/UDP endpoints of tracked PIDs | Read-only. Polls, so a process that lives shorter than `-PollMs` can be missed; elevated, it also reads `Win32_ProcessStartTrace`. No process attribution for file events |
+| `scripts/shot_windows.ps1 -Root <dir> \| -ImagePathRegex <rx> -Out <dir> [-Tag before]` | PNG of each visible top-level window of the app plus `index.json` (pid, image, class, title, rect) | Per-monitor DPI aware, `PrintWindow` with `PW_RENDERFULLCONTENT`, never sends input. Minimized windows are skipped; flat-color captures are marked `blank` |
+| `scripts/stop_app.ps1 -Root <dir> [-Confirm]` | stops processes whose image path is under the root, by PID after re-checking path and start time | Dry run unless `-Confirm`. Service hosts are skipped without `-IncludeServices`. Exit 2 when something survives |
+| `scripts/elevated_readonly.ps1 -App <rx> -Root <dir> -Out <dir>` | one elevated read-only bundle: elevated inventory, task XML (SYSTEM tasks too), `sc qc`/`qfailure`/`qtriggerinfo`/`sdshow`, Toolhelp32 module lists incl. 32-bit | Refuses without elevation and prints the exact command to paste into an elevated shell. One UAC prompt; if it is declined, retry at most once |
+
+All their outputs are DATA, like the captures below.
 
 ### Sysinternals (machine-readable)
 
