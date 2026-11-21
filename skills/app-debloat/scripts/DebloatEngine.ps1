@@ -419,6 +419,16 @@ function Test-AdManifest($m) {
     $vers = @(AdGet $sup 'versions' @() | Where-Object { "$_".Trim() })
     $range = (AdGet $sup 'allowRange' $false) -and (AdGet $sup 'min') -and (AdGet $sup 'max')
     if (-not $vers.Count -and -not $range) { $err.Add('version.supported.versions must list the observed versions (a min/max range only with allowRange: true)') }
+    # version.sources is a flat list of {source, ...}. A nested shape such as {file: {path}} silently resolves no
+    # version and would make every Apply refuse, so reject anything that is not exactly the documented form.
+    $srcs = @(AdGet (AdGet $m 'version') 'sources' @())
+    if (-not $srcs.Count) { $err.Add('version.sources must list at least one source, e.g. {"source":"file","path":"%ROOT%\\App.exe"}') }
+    $need = @{ registry = @('path'); uninstall = @(); file = @('path'); dirname = @(); text = @('path', 'regex') }
+    foreach ($s in $srcs) {
+        $k = AdGet $s 'source'
+        if (-not $k -or -not $need.ContainsKey("$k")) { $err.Add("version.sources entry $(ConvertTo-Json $s -Compress) must be {""source"": one of $($need.Keys -join '/'), ...}"); continue }
+        foreach ($f in $need["$k"]) { if (-not (AdGet $s $f)) { $err.Add("version.sources '$k' entry needs '$f'") } }
+    }
     $opts = @(AdGet $m 'options' @()); $optNames = @($opts | ForEach-Object { AdGet $_ 'name' })
     foreach ($o in $optNames) { if ($o -notmatch '^[A-Z][A-Za-z0-9]{1,30}$' -or @('Apply', 'Install', 'Uninstall', 'Auto', 'InstallRoot', 'Force') -contains $o) { $err.Add("bad option name '$o'") } }
     $ids = @{}
@@ -1300,6 +1310,7 @@ function Invoke-AppDebloat {
     Write-Host ("Version       : {0}{1}" -f $(if ($Ad.Version) { $Ad.Version } else { 'unknown' }), $(if ($supported) { '' } else { "  (NOT SUPPORTED; supported: $supText)" }))
     Write-Host ("Mode          : {0}" -f $(if ($Mode -eq 'Plan') { 'dry run (add -Apply to change things)' } elseif ($Mode -eq 'Auto') { 'AUTO (blocking actions only)' } else { $Mode.ToUpper() }))
     $on = @($Options.Keys | Where-Object { $Options[$_] }); if ($on) { Write-Host "Options       : $($on -join ', ')" }
+    if (-not $Ad.Version) { Say 'WARN' 'No version.sources entry returned a version, so -Apply/-Install/-Auto will refuse. Check the manifest sources against the installed files before going further.' }
     Write-Host ''
     if (-not $supported) {
         $vt = if ($Ad.Version) { "version $($Ad.Version)" } else { 'the version could not be read; it' }

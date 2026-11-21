@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here (Keep a Changelog style).
 
+## [0.1.2] - 2026-11-21
+### Changed
+- Reject malformed version.sources at build time and warn when no version resolves; pe_triage works under python -I by adding the user site-packages.
+
 ## [0.1.1] - 2026-11-20
 ### Changed
 - Engine safety fixes from the first G1 review: exclusive modes, version refusal in Auto, real-path checks, evidence-gated actions, conflict-aware undo, failure-preserving uninstall; plan template; numpy dependency and pure-Python fallback in pe_triage.

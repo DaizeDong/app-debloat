@@ -63,6 +63,10 @@ highest folder matching `pattern` that contains `mustContain`.
 
 **version.sources** (first non-empty wins): `registry {path, name, view}`, `uninstall` (DisplayVersion of the
 matched entry), `file {path}` (FileVersion), `dirname` (name of `{ver}`), `text {path, regex}` (capture group 1).
+Each entry is flat and names its kind in `source`, for example
+`{"source": "file", "path": "%ROOT%\\App.exe"}`. A nested shape such as `{"file": {"path": ...}}` is rejected
+when the script is built, because it would resolve no version and make every `-Apply` refuse. The dry run warns
+when no source returns a version.
 `supported` lists the versions the inventory actually inspected:
 
 ```json

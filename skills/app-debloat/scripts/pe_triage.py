@@ -30,6 +30,16 @@ import sys
 from array import array
 from collections import Counter
 
+# Running with "python -I" (isolated mode) hides the per-user site-packages, which is where pip --user puts
+# pefile and capstone on most machines. Add it back explicitly; this tool reads PE files only as data.
+try:
+    import site
+    _usersite = site.getusersitepackages()
+    if _usersite and os.path.isdir(_usersite) and _usersite not in sys.path:
+        sys.path.append(_usersite)
+except Exception:  # pragma: no cover
+    pass
+
 try:
     import pefile
     import capstone
