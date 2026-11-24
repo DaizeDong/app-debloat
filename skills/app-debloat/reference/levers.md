@@ -36,12 +36,13 @@ Delete `x.exe` (or a DLL) and create an empty directory named `x.exe` at the sam
 
 ## 3. File or Directory ACL Deny
 
-Add a deny ACE (write data, append, write attributes, delete) for the identity that rewrites the target.
+Add a deny ACE for the identity that rewrites the target. `rights: write` (default) denies WriteData, AppendData, WriteEA and WriteAttributes. `rights: write+protect` also denies Delete, DeleteSubdirectoriesAndFiles, ChangePermissions and TakeOwnership, and only on an Administrators-owned target.
 
 - Stops: writes by that identity.
 - Survives upgrade: yes for that path, unless the writer runs as SYSTEM or TrustedInstaller and resets the ACL.
 - AV risk: low.
-- Reversible: `icacls <path> /remove:d <sid>`. Record the full original SDDL first.
+- Reversible: `-Uninstall` removes exactly the rights the tool journaled. Do not use `icacls /remove:d`, which drops every deny entry of the SID. Record the full original SDDL first.
+- Trade-off: the user can no longer delete or clean that folder; the engine lifts its own entry (journaled as a note) when it must re-create a placeholder inside it.
 - Pitfalls:
   - A deny on the file does not stop rename-and-replace: anyone with `FILE_DELETE_CHILD` on the parent directory can delete or rename the file regardless. Deny on the parent, or use a placeholder.
   - A deny for the user does nothing against a SYSTEM service writer. Disable the service (lever 4).
@@ -62,6 +63,7 @@ Set the vendor service start type to Disabled and clear its recovery actions if 
   - Manual is not off. A service set to Manual (demand start) still runs whenever the app, its tasks or a COM activation start it; a snapshot showing `Manual, Stopped` proves nothing. Check updater logs or a Procmon capture of a launch, and use Disabled when the service must not run.
   - COM wakes services too. A COM server registered with an AppID `LocalService` value (often an updater's elevation or "on demand" class) starts that service whenever any process activates the class, and `sc qtriggerinfo` lists start triggers (network, device, ETW). Record which wake each service has; Disabled stops all of them, a firewall rule stops only the traffic.
   - A security suite may veto the change for one service: `ChangeServiceConfig` returns access denied although the service DACL and protection level (`sc qprotection`) allow it. Do not work around it. Record the evidence (error, `sc sdshow`, protection level, `fltmc` minifilters, installed AV), mark the action `knownFailure {reason, ref}` in the manifest so each run logs a WARN with the reason instead of a failure, and fall back to lever 5 for its wake tasks and lever 6 for its exe.
+  - Look for System event 7006 within a few seconds of each denied change ("The ScRegSetValueExW call failed for Start with the following error: Access is denied."). It confirms the veto is at the registry level, on the service's `Start` value (a registry filter, typically a security suite), not in the service's permissions. It names no service, so match it by timestamp to the denied `sc.exe config`, and add it as an anchor on the knownFailure's ledger entry (`pipeline-field-notes.md`, P5 Build: Known Failures).
   - Check `sc qfailure` (elevated) for recovery actions that restart it.
 
 ## 5. Scheduled Task Disable

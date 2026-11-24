@@ -44,7 +44,9 @@
 
 .PARAMETER Auto
   Used by the FabrikamDriveDebloat-Watch task: saved options, blocking actions only, full log to auto.log and one
-  compact line per run to history.log (known failures as [action-id xN, ref R]; their full text stays in auto.log).
+  compact line per run to history.log (known failures as [action-id xN, ref R], whose full text stays in auto.log;
+  then the text of each failure as FAIL: <item :: error>, unique and cut to about 200 characters; then the WARN text).
+  Placeholders it placed earlier that were deleted since are re-created while their parent folder exists.
   On a version the manifest does not list it changes nothing, logs a WARN line and exits 2.
 
 .PARAMETER InstallRoot
@@ -483,14 +485,14 @@ $ManifestJson = @'
 $Hooks = @{}
 # (no app-specific hooks)
 
-# ---- inlined DebloatEngine.ps1 1.4.0 ----
+# ---- inlined DebloatEngine.ps1 1.5.0 ----
 # DebloatEngine.ps1: manifest-driven neutralization engine for app-debloat.
 #
 # Dot-source it to get New-AppScript (the build step). A per-app script is the template with this
 # file inlined, so users download one file. Nothing here runs on load; Invoke-AppDebloat is the entry.
 # Reference: reference/manifest.md (schema, action types, journal, modes, exit codes).
 
-$script:AdEngineVersion = '1.4.0'
+$script:AdEngineVersion = '1.5.0'
 $script:AdEngineSource = $PSCommandPath
 $script:Ad = $null
 
@@ -507,7 +509,7 @@ function Say([string]$tag, [string]$msg, [switch]$NoCount) {
     $color = @{ DO = 'Yellow'; OK = 'Green'; SKIP = 'DarkGray'; WARN = 'Magenta'; FAIL = 'Red'; INFO = 'Gray'; CONFLICT = 'Red'; INACTIVE = 'DarkCyan' }[$tag]
     if ($script:Ad -and -not $NoCount) {
         if ($tag -eq 'WARN') { $script:Ad.Warnings++; $script:Ad.WarnLines.Add($msg) }
-        if ($tag -eq 'FAIL') { $script:Ad.Failures++ }
+        if ($tag -eq 'FAIL') { $script:Ad.Failures++; $script:Ad.FailLines.Add($msg) }
         if ($tag -eq 'CONFLICT') { $script:Ad.Conflicts++ }
     }
     Write-Host ('[{0,-4}] {1}' -f $tag, $msg) -ForegroundColor $color
@@ -937,8 +939,23 @@ function Test-AdIgnoredUninspectable($p) {
     foreach ($x in @($script:Ad.IgnoreUninspectable)) { if ($p.Name -like $x.Pattern) { return $x.Source } }
     $null
 }
+# True only when the process seen with start time $start is provably gone: no process has PID $id any more, it has
+# exited, or the PID now belongs to a process that started at another time. Anything unreadable is no proof ($false).
+function Test-AdProcessGone([int]$id, $start) {
+    $q = $null
+    try { $q = [Diagnostics.Process]::GetProcessById($id) } catch { return ($_.Exception.GetBaseException() -is [ArgumentException]) }
+    try {
+        $ex = $false; try { $ex = $q.HasExited } catch { }
+        if ($ex) { return $true }
+        if ($null -ne $start) { $now = $null; try { $now = $q.StartTime } catch { }; if ($null -ne $now -and $now -ne $start) { return $true } }
+        $false
+    } finally { $q.Dispose() }
+}
 # One record per running process: Name, Id, Session, Image, Modules (full paths, or $null when it could not be
 # inspected), Err, Protected. Cached per run; -Fresh takes a new snapshot (used right before a folder is replaced).
+# A snapshot refused with error 87 or 18 means the process exited meanwhile (scripts/list_modules.ps1), and 299 that
+# survives the retries is also what an exited process still held open by another handle reports. Such a process is
+# left out when Test-AdProcessGone proves it gone, and stays uninspectable while it still runs.
 function Get-AdModuleMap([switch]$Fresh) {
     if (-not $Fresh -and $script:Ad -and $script:Ad.ModMap) { return $script:Ad.ModMap }
     Initialize-AdNative
@@ -947,7 +964,9 @@ function Get-AdModuleMap([switch]$Fresh) {
     foreach ($p in [Diagnostics.Process]::GetProcesses()) {
         try {
             $id = $p.Id; if ($id -le 4) { continue }
+            $st = $null; try { $st = $p.StartTime } catch { }
             $err = 0; $mods = [AppDebloat.Modules]::List($id, [ref]$err)
+            if ($null -eq $mods -and @(87, 18, 299) -contains $err -and (Test-AdProcessGone $id $st)) { continue }
             $sess = -1; try { $sess = $p.SessionId } catch { }
             $prot = if ($null -eq $mods) { [AppDebloat.Modules]::Protection($id) } else { 0 }
             $map.Add([pscustomobject]@{ Name = $p.ProcessName; Id = $id; Session = $sess; Image = [AppDebloat.Modules]::ImagePath($id); Modules = $mods; Err = $err; Protected = ($prot -eq 1) })
@@ -958,7 +977,8 @@ function Get-AdModuleMap([switch]$Fresh) {
 }
 # Which processes have a module loaded from under $dir, matched by full module path (case-insensitive prefix on the
 # written and on the real path of $dir). Returns @{ Hits; Unknown }. A process that could not be inspected goes to
-# Unknown, never to "not loaded", except kernel minimal processes and protected (PP/PPL) processes whose image lies
+# Unknown (one that exited during the snapshot is not in the map at all, see Get-AdModuleMap), never to "not
+# loaded", except kernel minimal processes and protected (PP/PPL) processes whose image lies
 # outside the install root: those load only DLLs signed for their protection level, never the app's own files.
 # Processes whose image is in $ExcludeImages are left out (they are stopped before the change). Exempt holds the
 # isolated and VM processes that were skipped, Ignored the uninspectable ones skipped by -IgnoreUninspectable or
@@ -1090,6 +1110,10 @@ function Get-AdFirewallRules([string]$displayName) {
     foreach ($e in @($ev)) { if ("$($e.CategoryInfo.Category)" -ne 'ObjectNotFound') { throw "firewall rule query failed: $($e.Exception.Message)" } }
     $r
 }
+# The display name of the rule firewall-block-program makes for program $p of action $id.
+function Get-AdFirewallRuleName([string]$id, [string]$p) {
+    "AppDebloat $($script:Ad.AppId) $id $([IO.Path]::GetFileName($p)) $((Get-AdSha256Text $p.ToLowerInvariant()).Substring(0, 8))"
+}
 function Set-AdPlaceholder([string]$path, [ValidateSet('Directory', 'File')]$kind) {
     Assert-AdPathSafe $path
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force -Confirm:$false }
@@ -1135,6 +1159,56 @@ function Set-AdDenyAce([string]$path, [string]$sid, [int]$rights, [int]$inherita
         }
     } else { $sec.AddAccessRule((& $mk $rights)) }
     $item.SetAccessControl($sec)
+}
+# rights "write+protect" also denies these, so the denied user can neither delete the folder's content (a placeholder
+# included) nor strip the entry or take ownership.
+$script:AdDenyProtectRights = [int]([Security.AccessControl.FileSystemRights]'Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership')
+# Why "write+protect" may not be used on $path for $sid, or $null. The owner of an object keeps an implicit WRITE_DAC
+# that no deny entry takes away, and only an enabled SID counts as owner. An Administrators owner therefore lets the
+# elevated tool (Administrators enabled) lift and undo exactly its own rights, while the user's filtered token
+# (Administrators deny-only) cannot. An owner that is the denied SID could strip the entry; a SYSTEM, TrustedInstaller
+# or other owner would lock the elevated tool out of its own entry, since the deny binds the user SID it carries.
+function Get-AdProtectRefusal([string]$path, [string]$sid) {
+    $own = $null; try { $own = (Get-Item -LiteralPath $path -Force).GetAccessControl('Owner').GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
+    if (-not $own) { return "rights write+protect on ${path}: its owner cannot be read" }
+    if ($own -eq $sid) { return "rights write+protect on ${path}: its owner is the denied SID $sid, which keeps WRITE_DAC and could strip the entry; use rights write" }
+    if ($own -ne 'S-1-5-32-544') { return "rights write+protect on ${path}: its owner is $own; only an Administrators (S-1-5-32-544) owner keeps the entry out of the user's reach while the elevated tool can still lift and undo it; use rights write" }
+    $null
+}
+# Every right the tool added for one acl journal entry: the first line's addedRights plus the latest after.rights
+# (a later line, written when the tool re-adds rights or a rebuilt manifest asks for more, carries the full set).
+function Get-AdAclAdded($e) { [int](AdGet (AdGet $e 'original') 'addedRights' 0) -bor [int](AdGet (AdGet $e 'after') 'rights' 0) }
+# Deny entries this tool put on a parent or ancestor folder of $path (active acl: journal entries) bind the elevated
+# token too, which carries the same user SID, so the engine could not create or remove its own placeholder inside such
+# a folder. Enter-AdAclLift takes away exactly the journaled rights that are present (after a note journal line that
+# names them) and returns what it took; Exit-AdAclLift, called from a finally block, puts the same rights back.
+function Enter-AdAclLift([string]$path, [string]$actionId, [string]$key) {
+    $full = Get-AdNormal $path; $lifts = @()
+    foreach ($je in @($script:Ad.Journal.Values)) {
+        if ((AdGet $je 'prim') -ne 'acl') { continue }
+        $jd = AdGet $je 'data'; $ap = [string](AdGet $jd 'path')
+        if (-not $ap -or -not (Test-AdUnder $full (Get-AdNormal $ap)) -or -not (Test-Path -LiteralPath $ap -PathType Container)) { continue }
+        $sid = [string](AdGet $jd 'sid'); $inh = [int](AdGet $jd 'inheritance' 0)
+        $have = (Get-AdDenyRights $ap $sid $inh) -band (Get-AdAclAdded $je)
+        if ($have) { $lifts += [pscustomobject]@{ Path = $ap; Sid = $sid; Inh = $inh; Rights = $have } }
+    }
+    if (-not $lifts.Count) { return @() }
+    $names = @($lifts | ForEach-Object { "acl:$($_.Path)|$($_.Sid) rights $($_.Rights)" })
+    Add-AdJournalLine ([ordered]@{ kind = 'note'; ts = (Get-Date -Format s); app = $script:Ad.AppId; actionId = $actionId; key = $key
+                                   note = 'own deny entries lifted for the moment to create or remove this placeholder, then put back'; lifted = $names })
+    Say 'INFO' "lifting own deny entr$(if ($lifts.Count -gt 1) { 'ies' } else { 'y' }) for the moment to change ${path}: $($names -join '; ')"
+    $done = @()
+    try { foreach ($l in $lifts) { Set-AdDenyAce $l.Path $l.Sid $l.Rights $l.Inh -Remove; $done += $l } }
+    catch { Exit-AdAclLift $done; throw }
+    , $done
+}
+function Exit-AdAclLift($lifts) {
+    $bad = @()
+    foreach ($l in @($lifts)) {
+        if ($null -eq $l) { continue }
+        try { Set-AdDenyAce $l.Path $l.Sid $l.Rights $l.Inh } catch { $bad += "$($l.Path) for $($l.Sid): $($_.Exception.Message)" }
+    }
+    if ($bad.Count) { throw "could not put back own deny entr$(if ($bad.Count -gt 1) { 'ies' } else { 'y' }) ($($bad -join '; ')); the acl-deny-write action re-adds them on its next run" }
 }
 
 # ------------------------------------------------------------------ registry
@@ -1398,6 +1472,7 @@ function Test-AdManifest($m) {
             elseif (@($ptr.Substring(1).Split('/')) -contains '-') { $err.Add("$id`: json-set pointer may not use '-' (array append)") }
         }
         if ($t -eq 'hosts-block' -and (AdGet $a 'reapply' $false) -and -not (AdGet $a 'acknowledgeFlagging' $false)) { $err.Add("$id`: hosts-block needs acknowledgeFlagging") }
+        if ($t -eq 'acl-deny-write' -and @('write', 'write+protect') -notcontains (AdGet $a 'rights' 'write')) { $err.Add("$id`: rights must be write (default) or write+protect") }
     }
     if ($err.Count) { throw ("invalid manifest: " + ($err -join '; ')) }
 }
@@ -1622,6 +1697,14 @@ function Write-AdJournal($item) {
                                    prim = $item.Prim; key = $item.Key; desc = $item.Desc; reversible = $item.Reversible; evidence = $item.Evidence
                                    version = $script:Ad.Version; data = $item.Data; original = $item.Original; after = $item.After })
     $script:Ad.JournalKeys[$item.Key] = $ak
+    # The in-memory view of the active entries follows the same rule as Read-AdJournal: first original, latest after.
+    $k = [string]$item.Key
+    if ($script:Ad.Journal.Contains($k)) {
+        $script:Ad.Journal[$k] | Add-Member -NotePropertyName after -NotePropertyValue $item.After -Force
+        $script:Ad.Journal[$k] | Add-Member -NotePropertyName data -NotePropertyValue $item.Data -Force
+    } else {
+        $script:Ad.Journal[$k] = [pscustomobject]@{ key = $k; actionId = $item.ActionId; prim = $item.Prim; desc = $item.Desc; data = $item.Data; original = $item.Original; after = $item.After }
+    }
 }
 
 # ------------------------------------------------------------------ planning
@@ -1698,6 +1781,42 @@ function Get-AdTargets($a) {
     $t = @(AdGet $a 'target' @())
     foreach ($x in $t) { Resolve-AdTargets $x }
 }
+# True when a current target of the action names $path: equal to it, or matching it when the target has wildcards.
+function Test-AdTargetNames($a, [string]$path) {
+    foreach ($t in @(AdGet $a 'target' @())) {
+        $x = Expand-AdPath $t
+        if ($x -match '[\*\?]') { if ($path -like $x.Replace('[', '`[').Replace(']', '`]')) { return $true } }
+        elseif ($path -ieq $x) { return $true }
+    }
+    $false
+}
+# Placeholders this action placed earlier (active journal entries) that are gone now, deleted by a cleaner, an updater
+# or the user. A glob target resolves only against items that exist, so the journal finds them, not the target list.
+# Each is planned again under its own key, its kind taken from the entry's after-state (the journal keeps its first
+# original, and an identical after-state adds no line), while its parent folder exists and a current target still
+# names it; otherwise a SKIP line says why. $planned holds the keys the target list already planned.
+function Get-AdPlaceholderRedo($a, [string[]]$planned) {
+    $id = AdGet $a 'id'; $bk = [bool](AdGet $a 'backup' $true); $chk = [bool](AdGet $a 'checkLoaded' $true)
+    foreach ($e in @($script:Ad.Journal.Values)) {
+        if ((AdGet $e 'actionId') -ne $id -or @('file2dir', 'dir2file') -notcontains (AdGet $e 'prim')) { continue }
+        $p = [string](AdGet (AdGet $e 'data') 'path'); $key = "fs:$p"
+        if (-not $p -or @($planned) -contains $key -or (Test-Path -LiteralPath $p)) { continue }
+        $kind = AdGet (AdGet $e 'after') 'kind'
+        if (@('emptyDir', 'placeholderFile') -notcontains $kind) { continue }
+        if (-not (Test-AdTargetNames $a $p)) { Say 'SKIP' "${p}: the placeholder is gone, but no current target of $id names it; not re-created"; continue }
+        # Set-AdPlaceholder creates missing parents, so it would rebuild a version folder the vendor removed.
+        $parent = [IO.Path]::GetDirectoryName($p)
+        if (-not $parent -or -not (Test-Path -LiteralPath $parent -PathType Container)) { Say 'SKIP' "${p}: parent gone (version moved?)"; continue }
+        $why = Get-AdPathRefusal $p
+        if ($why) { Say 'WARN' "${p}: the placeholder is gone and is not re-created: $why"; continue }
+        if ($kind -eq 'emptyDir') {
+            New-AdItem $a 'file2dir' $key "Re-create placeholder directory (deleted since it was placed): $p" @{ path = $p; backup = $bk; stopHosts = @() } @{ existed = $false } ([ordered]@{ kind = 'emptyDir' })
+        } else {
+            $hosts = @(@(AdGet $a 'stopHosts' @()) | ForEach-Object { Get-AdNormal (Expand-AdPath $_) })
+            New-AdItem $a 'dir2file' $key "Re-create read-only placeholder file (deleted since it was placed): $p" @{ path = $p; backup = $bk; checkLoaded = $chk; stopHosts = $hosts } @{ existed = $false } ([ordered]@{ kind = 'placeholderFile' })
+        }
+    }
+}
 function Get-AdPrebootIdentity([string]$scr) { "powershell.exe|-NoProfile -ExecutionPolicy Bypass -File `"$scr`"|" }
 function Get-AdWatchIdentity([string]$installed) { "conhost.exe|--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installed`" -Auto|" }
 function Get-AdActionPlan($a) {
@@ -1750,10 +1869,13 @@ function Get-AdActionPlan($a) {
                     $fi = Get-Item -LiteralPath $f -Force
                     $items.Add((New-AdItem $a 'file2dir' "fs:$f" "Replace file with placeholder directory: $f" @{ path = $f; backup = $bk; stopHosts = @(@(AdGet $a 'stopHosts' @()) | ForEach-Object { Expand-AdPath $_ }) } `
                         @{ existed = $true; size = $fi.Length; sha256 = (Get-AdSha256 $f); fileVersion = $fi.VersionInfo.FileVersion; backup = $null } ([ordered]@{ kind = 'emptyDir' })))
-                } elseif ($create -and $f -notmatch '[\*\?]') {
+                } elseif ($create -and $f -notmatch '[\*\?]' -and -not ($script:Ad.Journal.Contains("fs:$f") -and (AdGet $script:Ad.Journal["fs:$f"] 'actionId') -eq $id)) {
+                    # A path journaled under this action is re-created by Get-AdPlaceholderRedo (parent check included);
+                    # that step reads only this action's entries, so one journaled under another id is pre-created here.
                     $items.Add((New-AdItem $a 'file2dir' "fs:$f" "Pre-create placeholder directory (blocks re-download): $f" @{ path = $f; backup = $false; stopHosts = @() } @{ existed = $false } ([ordered]@{ kind = 'emptyDir' })))
                 }
             }
+            foreach ($x in @(Get-AdPlaceholderRedo $a @($items | ForEach-Object { $_.Key }))) { $items.Add($x) }
         }
         'dir-placeholder-file' {
             $create = [bool](AdGet $a 'createIfMissing' $false); $bk = [bool](AdGet $a 'backup' $true); $chk = [bool](AdGet $a 'checkLoaded' $true)
@@ -1778,15 +1900,19 @@ function Get-AdActionPlan($a) {
                     $bytes = 0; foreach ($x in $files) { $bytes += $x.Length }
                     $items.Add((New-AdItem $a 'dir2file' "fs:$d" "Replace folder with read-only placeholder file: $d ($($files.Count) files)$note" @{ path = $d; backup = $bk; checkLoaded = $chk; stopHosts = $hosts } `
                         @{ existed = $true; fileCount = $files.Count; bytes = $bytes; backup = $null } ([ordered]@{ kind = 'placeholderFile' })))
-                } elseif ($create -and $d -notmatch '[\*\?]') {
+                } elseif ($create -and $d -notmatch '[\*\?]' -and -not ($script:Ad.Journal.Contains("fs:$d") -and (AdGet $script:Ad.Journal["fs:$d"] 'actionId') -eq $id)) {
                     $items.Add((New-AdItem $a 'dir2file' "fs:$d" "Pre-create read-only placeholder file (blocks re-download): $d" @{ path = $d; backup = $false; checkLoaded = $false; stopHosts = @() } @{ existed = $false } ([ordered]@{ kind = 'placeholderFile' })))
                 }
             }
+            foreach ($x in @(Get-AdPlaceholderRedo $a @($items | ForEach-Object { $_.Key }))) { $items.Add($x) }
         }
         'acl-deny-write' {
             $pr = AdGet $a 'principal' 'CurrentUser'
             $sid = switch ($pr) { 'CurrentUser' { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } 'Users' { 'S-1-5-32-545' } default { $pr } }
             if ($sid -notmatch '^S-1-[\d-]+$') { throw "principal must be CurrentUser, Users or a SID: $pr" }
+            $prot = (AdGet $a 'rights' 'write') -eq 'write+protect'
+            $want = if ($prot) { $script:AdDenyWriteRights -bor $script:AdDenyProtectRights } else { $script:AdDenyWriteRights }
+            $deny = if ($prot) { 'write, delete and permission changes' } else { 'write' }
             foreach ($p in (Get-AdTargets $a)) {
                 Assert-AdPathSafe $p
                 $exists = Test-Path -LiteralPath $p
@@ -1794,13 +1920,19 @@ function Get-AdActionPlan($a) {
                 $isDir = (-not $exists) -or (Test-Path -LiteralPath $p -PathType Container)
                 $inh = if ($isDir) { [int]([Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit') } else { 0 }
                 $pre = if ($exists) { Get-AdDenyRights $p $sid $inh } else { 0 }
-                $added = $script:AdDenyWriteRights -band (-bnot $pre)
-                if (-not $added) { Say 'SKIP' "$p already denies write to $pr"; continue }
+                $added = $want -band (-bnot $pre)
+                if (-not $added) { Say 'SKIP' "$p already denies $deny to $pr"; continue }
+                # A folder created by -Apply is checked right after it is created (Invoke-AdItem).
+                if ($prot -and $exists) { $why = Get-AdProtectRefusal $p $sid; if ($why) { throw $why } }
                 $n = 0; if ($exists -and $isDir) { $n = @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop).Count }
                 $empty = [bool](AdGet $a 'emptyFirst' $false)
-                $what = if ($empty -and $n) { "Empty ($n entries) and deny write" } else { 'Deny write' }
-                $items.Add((New-AdItem $a 'acl' "acl:$p|$sid" "$what to $pr on $p" @{ path = $p; sid = $sid; emptyFirst = $empty; inheritance = $inh } `
-                    @{ existed = $exists; entries = $n; preRights = $pre; addedRights = $added } ([ordered]@{ sid = $sid; rights = $added; inheritance = $inh })))
+                $what = if ($empty -and $n) { "Empty ($n entries) and deny $deny" } else { "Deny $deny" }
+                # after.rights is every right the tool has added for this key, so -Uninstall removes all of them even
+                # when a rebuilt manifest added rights to an entry an earlier run made.
+                $key = "acl:$p|$sid"; $all = $added
+                if ($script:Ad.Journal.Contains($key)) { $all = $all -bor (Get-AdAclAdded $script:Ad.Journal[$key]) }
+                $items.Add((New-AdItem $a 'acl' $key "$what to $pr on $p" @{ path = $p; sid = $sid; emptyFirst = $empty; inheritance = $inh; protect = $prot } `
+                    @{ existed = $exists; entries = $n; preRights = $pre; addedRights = $added } ([ordered]@{ sid = $sid; rights = $all; inheritance = $inh })))
             }
         }
         'ifeo-block' {
@@ -1879,15 +2011,26 @@ function Get-AdActionPlan($a) {
         }
         'firewall-block-program' {
             $dir = AdGet $a 'direction' 'Outbound'
+            # A rule made for a program that is gone stays until -Uninstall; the SKIP line names it (never removed here).
+            $left = "-Uninstall removes it, or drop the target and rebuild"
+            $seen = @()
             foreach ($p in (Get-AdTargets $a)) {
                 Assert-AdPathSafe $p -NoTouch
-                if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { Say 'SKIP' "$p not present"; continue }
-                $h = ((Get-AdSha256Text $p.ToLowerInvariant()).Substring(0, 8))
-                $name = "AppDebloat $($script:Ad.AppId) $id $([IO.Path]::GetFileName($p)) $h"
+                $name = Get-AdFirewallRuleName $id $p; $seen += $name
+                if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
+                    Say 'SKIP' "$p not present$(if (@(Get-AdFirewallRules $name).Count) { "; rule $name still present; $left" })"; continue
+                }
                 if (@(Get-AdFirewallRules $name).Count) { Say 'SKIP' "firewall rule exists: $name"; continue }
                 $grp = "AppDebloat-$($script:Ad.AppId)"
                 $items.Add((New-AdItem $a 'firewall' "fw:$name" "Firewall: block $dir traffic of $p" @{ name = $name; program = $p; direction = $dir; group = $grp } @{ ruleExisted = $false } `
                     ([ordered]@{ name = $name; program = $p; group = $grp })))
+            }
+            # A glob target names nothing once its file is gone; the journal still knows the rules made for it.
+            foreach ($e in @($script:Ad.Journal.Values)) {
+                if ((AdGet $e 'actionId') -ne $id -or (AdGet $e 'prim') -ne 'firewall') { continue }
+                $prog = [string](AdGet (AdGet $e 'data') 'program'); $name = [string](AdGet (AdGet $e 'data') 'name')
+                if (-not $prog -or $seen -contains $name -or (Test-Path -LiteralPath $prog -PathType Leaf) -or -not (Test-AdTargetNames $a $prog)) { continue }
+                if (@(Get-AdFirewallRules $name).Count) { Say 'SKIP' "$prog not present; rule $name still present; $left" }
             }
         }
         'hosts-block' {
@@ -1972,7 +2115,7 @@ function Get-AdActionPlan($a) {
         }
         'hook' {
             $hn = AdGet $a 'hook'; $h = $script:Ad.Hooks[$hn]
-            if (-not $h -or -not $h.Plan -or -not $h.Apply) { throw "hook '$hn' is not defined (needs Plan and Apply)" }
+            if (-not (AdGet $h 'Plan') -or -not (AdGet $h 'Apply')) { throw "hook '$hn' is not defined (needs Plan and Apply)" }
             foreach ($r in @(& $h.Plan $script:Ad $a)) {
                 if ($null -eq $r) { continue }
                 $items.Add((New-AdItem $a 'hook' "hook:$hn|$($r.Key)" $r.Desc @{ hook = $hn; data = $r.Data } $r.Original (AdGet $r 'After')))
@@ -2071,12 +2214,37 @@ function Invoke-AdItem($it) {
         if ($n -ne $it.Original.fileCount) { throw "backup of $($d.path) holds $n of $($it.Original.fileCount) files; nothing changed" }
         $it.Original.backup = $bk
     }
+    # Re-assert over a file the vendor wrote back: the first backup holds only the build found on first touch, so a
+    # build that differs from it is kept as backup\<key16>.<sha8>.bin before it is replaced (an early sign of version
+    # drift). The same build as the first original needs no copy.
+    if (-not $first -and $it.Prim -eq 'file2dir' -and (Test-Path -LiteralPath $d.path -PathType Leaf)) {
+        $je = if ($script:Ad.Journal.Contains([string]$it.Key)) { $script:Ad.Journal[[string]$it.Key] } else { $null }
+        $was = [string](AdGet (AdGet $je 'original') 'sha256'); $now = Get-AdSha256 $d.path
+        if ($now -ne $was -or -not $now) {
+            $fv = $null; try { $fv = (Get-Item -LiteralPath $d.path -Force).VersionInfo.FileVersion } catch { }
+            $s8 = if ($now) { $now.Substring(0, 8).ToLowerInvariant() } else { 'unreadable' }
+            $kept = '; no copy kept (backup: false)'
+            if (-not $now) { $kept = '; no copy kept (the file cannot be read)' }
+            elseif ($d.backup) {
+                $bk = "$(Get-AdBackupPath $it.Key).$s8.bin"
+                if (-not ((Test-Path -LiteralPath $bk -PathType Leaf) -and (Get-AdSha256 $bk) -eq $now)) {
+                    Copy-Item -LiteralPath $d.path -Destination $bk -Force
+                    if ((Get-AdSha256 $bk) -ne $now) { throw "copy of the restored build $($d.path) does not match its hash; nothing changed" }
+                }
+                $kept = "; copy kept as $bk"
+            }
+            Say 'WARN' "$($d.path): vendor restored a different build (sha256 $s8, file version $(if ($fv) { $fv.Trim() } else { 'none' }))$kept"
+        }
+    }
     Write-AdJournal $it
     switch ($it.Prim) {
         'service' {
             # Neither failure is thrown: a security-suite veto of sc.exe is often a known failure (see New-AdFailure).
             $r = Invoke-AdNative sc.exe @('config', $d.name, 'start=', 'disabled') -NoThrow
-            if ($r.Code) { return (New-AdFailure "sc.exe exit $($r.Code): $($r.Out)" $r.Code) }
+            if ($r.Code) {
+                $it | Add-Member -NotePropertyName FailedAt -NotePropertyValue (Get-Date) -Force   # for the event 7006 lookup
+                return (New-AdFailure "sc.exe exit $($r.Code): $($r.Out)" $r.Code)
+            }
             if ($d.stop -and $it.Original.state -eq 'Running') {
                 $ev = $null; Stop-Service -Name $d.name -Force -ErrorAction SilentlyContinue -ErrorVariable ev
                 if (@($ev).Count) { Say 'WARN' "service $($d.name) disabled but did not stop: $(@($ev)[0].Exception.Message)" }
@@ -2087,9 +2255,13 @@ function Invoke-AdItem($it) {
             Assert-AdPathSafe $d.path
             foreach ($h in @($d.stopHosts)) { if ($h) { Stop-AdProcessByPath $h } }
             if ($d.path -like '*.exe') { Stop-AdProcessByPath $d.path }
-            Set-AdPlaceholder $d.path 'Directory'
+            $lift = Enter-AdAclLift $d.path $it.ActionId $it.Key
+            try { Set-AdPlaceholder $d.path 'Directory' } finally { Exit-AdAclLift $lift }
         }
-        'dir2file' { Set-AdPlaceholder $d.path 'File' }
+        'dir2file' {
+            $lift = Enter-AdAclLift $d.path $it.ActionId $it.Key
+            try { Set-AdPlaceholder $d.path 'File' } finally { Exit-AdAclLift $lift }
+        }
         'iniset' {
             Assert-AdPathSafe $d.path -EditInPlace
             [void](Update-AdIni $d.path @(, @($d.section, $d.key, $d.value)) $true ([string]$d.encoding))
@@ -2109,6 +2281,7 @@ function Invoke-AdItem($it) {
         'acl' {
             Assert-AdPathSafe $d.path
             if (-not (Test-Path -LiteralPath $d.path)) { New-Item -ItemType Directory -Path $d.path -Force | Out-Null }
+            if (AdGet $d 'protect' $false) { $why = Get-AdProtectRefusal $d.path $d.sid; if ($why) { throw $why } }
             $isDir = Test-Path -LiteralPath $d.path -PathType Container
             if ($d.emptyFirst -and $isDir) { Get-ChildItem -LiteralPath $d.path -Force | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -Confirm:$false } }
             Set-AdDenyAce $d.path $d.sid ([int]$it.Original.addedRights) ([int]$d.inheritance)
@@ -2170,38 +2343,46 @@ function Invoke-AdUndo($e) {
             if ((AdGet $o 'state') -ne 'Disabled') { Enable-ScheduledTask -TaskPath $d.path -TaskName $d.name | Out-Null }
         }
         'file2dir' {
+            # The removal and the restore run with the tool's own deny entries above $p lifted (Enter-AdAclLift).
             $p = $d.path
             if (Test-Path -LiteralPath $p -PathType Leaf) { return "SKIP $p is a file again (restored by the vendor)" }
-            if (Test-Path -LiteralPath $p -PathType Container) {
-                if (@(Get-ChildItem -LiteralPath $p -Force).Count) { return "CONFLICT placeholder folder $p is no longer empty; left as is" }
-                Remove-Item -LiteralPath $p -Force
+            $isPh = Test-Path -LiteralPath $p -PathType Container
+            if ($isPh -and @(Get-ChildItem -LiteralPath $p -Force).Count) { return "CONFLICT placeholder folder $p is no longer empty; left as is" }
+            $bk = AdGet $o 'backup'
+            $restore = (AdGet $o 'existed') -and $bk -and (Test-Path -LiteralPath $bk -PathType Leaf) -and (Get-AdSha256 $bk) -eq (AdGet $o 'sha256')
+            if ($isPh -or $restore) {
+                $lift = Enter-AdAclLift $p (AdGet $e 'actionId') (AdGet $e 'key')
+                try {
+                    if ($isPh) { Remove-Item -LiteralPath $p -Force }
+                    if ($restore) { Copy-Item -LiteralPath $bk -Destination $p }
+                } finally { Exit-AdAclLift $lift }
             }
             if (-not (AdGet $o 'existed')) { return }
-            $bk = AdGet $o 'backup'
-            if ($bk -and (Test-Path -LiteralPath $bk -PathType Leaf) -and (Get-AdSha256 $bk) -eq (AdGet $o 'sha256')) {
-                Copy-Item -LiteralPath $bk -Destination $p; return "OK restored $p from backup"
-            }
+            if ($restore) { return "OK restored $p from backup" }
             return "REINSTALL $p"
         }
         'dir2file' {
             $p = $d.path
             if (Test-Path -LiteralPath $p -PathType Container) { return "SKIP $p is a folder again (restored by the vendor)" }
-            if (Test-Path -LiteralPath $p -PathType Leaf) {
-                $f = Get-Item -LiteralPath $p -Force
-                if ($f.Length -ne 0) { return "CONFLICT placeholder file $p now has content; left as is" }
-                $f.IsReadOnly = $false; Remove-Item -LiteralPath $p -Force
+            $isPh = Test-Path -LiteralPath $p -PathType Leaf
+            if ($isPh -and (Get-Item -LiteralPath $p -Force).Length -ne 0) { return "CONFLICT placeholder file $p now has content; left as is" }
+            $bk = AdGet $o 'backup'
+            $restore = (AdGet $o 'existed') -and $bk -and (Test-Path -LiteralPath $bk -PathType Container) -and @(Get-ChildItem -LiteralPath $bk -Recurse -File -Force).Count -eq (AdGet $o 'fileCount')
+            if ($isPh -or $restore) {
+                $lift = Enter-AdAclLift $p (AdGet $e 'actionId') (AdGet $e 'key')
+                try {
+                    if ($isPh) { $f = Get-Item -LiteralPath $p -Force; $f.IsReadOnly = $false; Remove-Item -LiteralPath $p -Force }
+                    if ($restore) { Copy-Item -LiteralPath $bk -Destination $p -Recurse }
+                } finally { Exit-AdAclLift $lift }
             }
             if (-not (AdGet $o 'existed')) { return }
-            $bk = AdGet $o 'backup'
-            if ($bk -and (Test-Path -LiteralPath $bk -PathType Container) -and @(Get-ChildItem -LiteralPath $bk -Recurse -File -Force).Count -eq (AdGet $o 'fileCount')) {
-                Copy-Item -LiteralPath $bk -Destination $p -Recurse; return "OK restored $p from backup"
-            }
+            if ($restore) { return "OK restored $p from backup" }
             return "REINSTALL $p\"
         }
         'acl' {
             $p = $d.path
             if (-not (Test-Path -LiteralPath $p)) { return "GONE $p no longer exists" }
-            $added = [int](AdGet $o 'addedRights' 0); $inh = [int](AdGet $d 'inheritance' 0)
+            $added = Get-AdAclAdded $e; $inh = [int](AdGet $d 'inheritance' 0)
             $have = (Get-AdDenyRights $p $d.sid $inh) -band $added
             if ($have -eq 0) { $r = "SKIP deny entry on $p already removed" }
             elseif ($have -ne $added) { return "CONFLICT deny entry for $($d.sid) on $p was changed since the tool added it; left as is" }
@@ -2343,7 +2524,8 @@ function Invoke-AdUndo($e) {
         }
         'hook' {
             $h = $script:Ad.Hooks[$d.hook]
-            if (-not $h -or -not $h.Undo) { return "WARN hook $($d.hook) has no Undo: $($e.desc)" }
+            # AdGet, not $h.Undo: the built script runs under Set-StrictMode 2, where a missing key throws.
+            if (-not (AdGet $h 'Undo')) { return "WARN hook $($d.hook) has no Undo: $($e.desc)" }
             return (& $h.Undo $script:Ad $d.data $o $e)
         }
         default { return "WARN unknown journal entry type '$($e.prim)': $($e.desc)" }
@@ -2364,6 +2546,19 @@ function Test-AdAccessDenied($er) {
     }
     $false
 }
+# System log event 7006 of the Service Control Manager within 5 s of $at, oldest first. 'ScRegSetValueExW call failed
+# for Start' there means the denial hit the service's Start registry value, not the service's own permissions. The
+# event names no service, so the match is by time only. Readable without elevation; never throws.
+function Get-AdScmDenialEvents([datetime]$at) {
+    $ev = $null; $found = @()
+    try {
+        $found = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7006
+                                                    StartTime = $at.AddSeconds(-5); EndTime = $at.AddSeconds(5) } -ErrorAction SilentlyContinue -ErrorVariable ev)
+    } catch { return "unavailable: $($_.Exception.Message)" }
+    foreach ($x in @($ev)) { if ("$($x.FullyQualifiedErrorId)" -notlike 'NoMatchingEventsFound*') { return "unavailable: $($x.Exception.Message)" } }
+    if (-not $found.Count) { return "none between $($at.AddSeconds(-5).ToString('HH:mm:ss')) and $($at.AddSeconds(5).ToString('HH:mm:ss'))" }
+    foreach ($x in @($found | Sort-Object TimeCreated)) { "$($x.TimeCreated.ToString('HH:mm:ss.fff')) $(("$($x.Message)" -replace '\s+', ' ').Trim())" }
+}
 function Write-AdDiagLines([string]$label, [scriptblock]$get) {
     try { $out = @(& $get | ForEach-Object { "$_".TrimEnd() } | Where-Object { $_ }) } catch { $out = @("unavailable: $($_.Exception.Message)") }
     if (-not $out.Count) { $out = @('(nothing reported)') }
@@ -2379,6 +2574,8 @@ function Write-AdDenialDiagnostics($it) {
         'service' {
             Write-AdDiagLines "service $($d.name) security descriptor (sc sdshow):" { Get-AdNativeLines sc.exe @('sdshow', $d.name) }
             Write-AdDiagLines "service $($d.name) protection level (sc qprotection):" { Get-AdNativeLines sc.exe @('qprotection', $d.name) }
+            $at = AdGet $it 'FailedAt' (Get-Date)
+            Write-AdDiagLines 'System log event 7006 (Service Control Manager) within 5 s of the failure (it names no service: matched by time only):' { Get-AdScmDenialEvents $at }
         }
         { @('regset', 'regdel', 'ifeo') -contains $_ } {
             $sub = switch ($it.Prim) { 'regset' { $d.sub } 'regdel' { "$($d.parent)\$($d.name)" } 'ifeo' { "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$($d.name)" } }
@@ -2447,6 +2644,9 @@ function Remove-AdStateFiles([switch]$KeepRestore) {
 # Returns the number of entries that were not cleanly undone (WARN, CONFLICT or failure).
 function Invoke-AdUninstall {
     $journal = @(Read-AdJournal)
+    # Placeholder undo lifts the tool's own deny entries above it (Enter-AdAclLift); one already undone here holds
+    # none of its rights any more, so it is not lifted or put back.
+    $script:Ad.Journal = [ordered]@{}; foreach ($e in $journal) { $script:Ad.Journal[[string]$e.key] = $e }
     $reinstall = @(); $issues = New-Object System.Collections.Generic.List[string]
     for ($i = $journal.Count - 1; $i -ge 0; $i--) {
         $e = $journal[$i]
@@ -2536,10 +2736,11 @@ function Invoke-AppDebloat {
           [hashtable]$Options = @{}, [string]$InstallRoot, [switch]$Force, [string]$ScriptPath, [string[]]$IgnoreUninspectable = @())
     if (@('Plan', 'Apply', 'Install', 'Uninstall', 'Auto') -notcontains $Mode) { Write-Host "[FAIL] unknown mode '$Mode'. Nothing was changed." -ForegroundColor Red; return 2 }
     $m = $ManifestJson | ConvertFrom-Json
-    $script:Ad = @{ Changes = 0; Failures = 0; Warnings = 0; Conflicts = 0; WarnLines = (New-Object System.Collections.Generic.List[string]); Hooks = $Hooks
+    $script:Ad = @{ Changes = 0; Failures = 0; Warnings = 0; Conflicts = 0; WarnLines = (New-Object System.Collections.Generic.List[string])
+                    FailLines = (New-Object System.Collections.Generic.List[string]); Hooks = $Hooks
                     Manifest = $m; Vars = @{}; Root = $null; Ver = $null; Uninstall = $null; KeepState = $false; Options = $Options
                     Bases = (New-Object System.Collections.Generic.List[string]); RealBases = @{}; CoreFiles = @(); PreserveFiles = @(); CoreProcs = @(); CoreSvcs = @(); Restartable = @()
-                    JournalKeys = @{}; Version = $null; AppId = 'unknown'; StateDir = $null; Mode = $Mode; ModMap = $null
+                    JournalKeys = @{}; Journal = [ordered]@{}; Version = $null; AppId = 'unknown'; StateDir = $null; Mode = $Mode; ModMap = $null
                     Shown = @{}; IgnoreUninspectable = @(); KnownFailures = @{}; KnownTargets = @{}; KnownFailed = 0; KnownBy = [ordered]@{}
                     TaskCacheOn = $false; TaskCache = $null; SavedTasks = $null; IsAdmin = (Test-AdIsAdmin) }
     try { Test-AdManifest $m } catch { Say 'FAIL' $_.Exception.Message; return 2 }
@@ -2643,7 +2844,10 @@ function Invoke-AppDebloat {
     }
     if ($Mode -eq 'Auto' -and $prevFp -and $prevFp -ne $fingerprint) { Say 'WARN' "version fingerprint changed $prevFp -> ${fingerprint}: only blocking actions are re-applied; re-run inventory (P1 to P3)" }
 
-    $Ad.JournalKeys = @{}; foreach ($e in @(Read-AdJournal)) { $Ad.JournalKeys[$e.key] = Get-AdAfterKey (AdGet $e 'after') }
+    # Active journal entries by key: the plan re-creates placeholders and names leftover firewall rules from them, and
+    # placeholder changes lift the tool's own deny entries found there. Write-AdJournal keeps it current.
+    $Ad.JournalKeys = @{}; $Ad.Journal = [ordered]@{}
+    foreach ($e in @(Read-AdJournal)) { $k = [string]$e.key; $Ad.Journal[$k] = $e; $Ad.JournalKeys[$k] = Get-AdAfterKey (AdGet $e 'after') }
     $wkey = "watchtask:$($Ad.WatchTask)"
     if ($Mode -eq 'Install') {
         # Checked before anything changes; the task itself is registered only after a clean apply (see below).
@@ -2657,7 +2861,7 @@ function Invoke-AppDebloat {
     # An action backed only by inferred or hypothesis evidence is inactive unless its 'when' option is given.
     $items = New-Object System.Collections.Generic.List[object]
     $inactive = New-Object System.Collections.Generic.List[string]
-    $known = New-Object System.Collections.Generic.List[object]
+    $known = New-Object System.Collections.Generic.List[object]; $planFailed = @{}; $planWarned = @{}
     $Ad.TaskCacheOn = $true; $Ad.TaskCache = $null
     foreach ($a in @(AdGet $m 'actions' @())) {
         $w = AdGet $a 'when'; $u = AdGet $a 'unless'; $ev = AdGet $a 'evidence'
@@ -2670,8 +2874,12 @@ function Invoke-AppDebloat {
         if ($w -and -not $Options[$w]) { continue }
         if ($u -and $Options[$u]) { continue }
         $aid = AdGet $a 'id'; $kf = $Ad.KnownFailures[$aid]; if ($kf) { $known.Add($a) }
+        # A plan that deferred a target with a WARN (loaded modules, a foreign IFEO Debugger) may yield no item while
+        # the knownFailure still applies; $planWarned keeps its WARN header below.
+        $w0 = $Ad.Warnings
         try { foreach ($it in (Get-AdActionPlan $a)) { $it.Known = Get-AdKnownFailure $it; $items.Add($it) } }
         catch {
+            $planFailed[$aid] = 1
             # A failure before any item exists is known only under the whole-action form: targets cannot name it.
             if ($kf -and -not $Ad.KnownTargets.ContainsKey($aid)) {
                 Add-AdKnownFailed $aid $kf
@@ -2679,6 +2887,7 @@ function Invoke-AppDebloat {
             }
             else { Say 'FAIL' "${aid}: $($_.Exception.Message)" }
         }
+        if ($Ad.Warnings -gt $w0) { $planWarned[$aid] = 1 }
     }
     $Ad.TaskCacheOn = $false; $Ad.TaskCache = $null
     $knownItems = @($items | Where-Object { $_.Known }).Count
@@ -2698,12 +2907,20 @@ function Invoke-AppDebloat {
         foreach ($x in $inactive) { Say 'INACTIVE' $x }
     }
     if ($Mode -ne 'Auto') { Write-AdOptionsNotSelected $m $Options }
-    # A recorded, explained failure is named on every run, so it is neither forgotten nor mistaken for a new one.
+    # A recorded, explained failure is named on every run, so it is neither forgotten nor mistaken for a new one. One
+    # that covers no planned item and saw no plan-time failure or WARN (its targets are gone, as after a vendor removed
+    # an old updater) is an INFO that says to drop it instead; not for task-disable without elevation, which cannot see
+    # SYSTEM tasks, and not when the plan deferred a target with a WARN.
     if ($known.Count) {
         Write-Host ''
         Write-Host ("Known Failures: {0} action(s) carry a recorded failure (logged as WARN, counted apart from failures and warnings)" -f $known.Count)
         foreach ($a in $known) {
             $aid = AdGet $a 'id'; $kf = $Ad.KnownFailures[$aid]
+            $blind = ((AdGet $a 'type') -eq 'task-disable' -and -not $Ad.IsAdmin)
+            if (-not $blind -and -not $planFailed.ContainsKey($aid) -and -not $planWarned.ContainsKey($aid) -and -not @($items | Where-Object { $_.ActionId -eq $aid -and $_.Known }).Count) {
+                Say 'INFO' "knownFailure $(AdGet $kf 'ref') on $aid covered nothing this run (targets not present or already in place); remove it from the manifest"
+                continue
+            }
             $for = if ($Ad.KnownTargets.ContainsKey($aid)) { " for $(@(AdGet $kf 'targets') -join ', ')" } else { '' }
             Say 'WARN' "[$aid] knownFailure$for (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason')" -NoCount
         }
@@ -2752,10 +2969,13 @@ function Invoke-AppDebloat {
         [IO.File]::WriteAllText($statePath, ([ordered]@{ fingerprint = $fingerprint; lastRun = (Get-Date -Format s); engine = $script:AdEngineVersion } | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
     }
     if ($Mode -eq 'Auto') {
-        # One compact line: known failures by action id and count (their full text is in auto.log), then other WARNs.
+        # One compact line: known failures by action id and count (their full text is in auto.log), then the FAIL
+        # text (desc :: message, unique, each cut to 200 characters), then other WARNs.
         $kb = if ($Ad.KnownBy.Count) { ' [' + ((@($Ad.KnownBy.Keys) | ForEach-Object { "$_ x$($Ad.KnownBy[$_].N), ref $($Ad.KnownBy[$_].Ref)" }) -join '; ') + ']' } else { '' }
+        $fl = @($Ad.FailLines | ForEach-Object { $s = ("$_" -replace '\s+', ' ').Trim(); if ($s.Length -gt 200) { $s.Substring(0, 197) + '...' } else { $s } } | Select-Object -Unique)
+        $fail = if ($fl.Count) { ' FAIL: ' + ($fl -join ' | ') } else { '' }
         $warn = if ($Ad.WarnLines.Count) { ' WARN: ' + (($Ad.WarnLines | Select-Object -Unique) -join ' | ') } else { '' }
-        Write-AdHistory ("{0}: {1} change(s), {2} failure(s), {3} known failure(s){4}{5}" -f $fingerprint, $Ad.Changes, $Ad.Failures, $Ad.KnownFailed, $kb, $warn)
+        Write-AdHistory ("{0}: {1} change(s), {2} failure(s), {3} known failure(s){4}{5}{6}" -f $fingerprint, $Ad.Changes, $Ad.Failures, $Ad.KnownFailed, $kb, $fail, $warn)
         & $stopLog
     }
     if (-not $apply) { Write-Host "$($items.Count) change(s) planned$knownText. Run again with -Apply in an elevated PowerShell to execute exactly this plan." }

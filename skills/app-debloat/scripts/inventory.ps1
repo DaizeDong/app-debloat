@@ -14,6 +14,12 @@
   that name this skill's scripts folder or an agent shell snapshot, and helper shells (bash,
   powershell, cmd, python, node) that descend from the same agent session. Counts per reason are
   in "self_excluded".
+  Credential-like values in recorded command lines (processes[].command_line and the item key
+  built from it, tasks[].actions[].arguments, shortcut arguments, Run key values, service
+  recovery commands) become <redacted>, keeping the switch and parameter names: switches and
+  parameters whose name contains token, stoken, bduss, session, password, passwd, secret, cookie
+  or auth (access_token= included), JSON members with such names, and Cookie and Authorization
+  headers. A bare value with no name is not recognized.
   The snapshot is real-run DATA: write it to the private companion, never into the tool repo.
 
 .PARAMETER App
@@ -77,7 +83,7 @@ param(
     [switch]$AutorunsAcceptEula,
     [string]$AutorunsPath
 )
-$ToolVersion = '1.2.0'
+$ToolVersion = '1.3.0'
 $ErrorActionPreference = 'Stop'
 $AppSource = $null
 if ($AppFile) {
@@ -190,6 +196,35 @@ function Add-Failure([string]$section, [string]$target, [string]$err) {
 function Add-Item([string]$cat, $obj) {
     if (-not $Snap.items.Contains($cat)) { $Snap.items[$cat] = New-Object System.Collections.Generic.List[object] }
     $Snap.items[$cat].Add($obj)
+}
+# Credential-like values in command lines become <redacted>; switch and parameter names stay.
+# The same rule is in launch_monitor.ps1 and elevated_readonly.ps1.
+$SecretName = '[\w.-]*?(?:token|stoken|bduss|session|password|passwd|secret|cookie|auth)[\w.-]*'
+$StrongName = '[\w.-]*?(?:token|stoken|bduss|password|passwd|secret|cookie)[\w.-]*'
+$SecretRx = @(
+    # -name value, --name=value, /name:value. After a token, bduss, password, secret or cookie switch the next
+    # word is the value even when it starts with - or / (base64 can); after a session or auth switch a
+    # following switch is not taken. Only the value is matched (the name sits in the lookbehind), so a value
+    # that is itself such a switch is redacted and the word after it still is too.
+    [regex]::new('(?<=(?<![^\s"''(])(?:--?|/)(?:' + $StrongName + '\s+|' + $SecretName + '(?:[=:]|\s+(?=[^\s/-]))))(?<v>"[^"]*"?|''[^'']*''?|[^\s"'']+)', 'IgnoreCase'),
+    # name=value in a query string or key=value list (?access_token=..., &session=...)
+    [regex]::new('(?<![\w./-])(?<n>' + $SecretName + ')(?<s>=)(?<v>"[^"]*"?|[^\s"''&#;,]+)', 'IgnoreCase'),
+    # "name": "value" in JSON on a command line, quotes possibly escaped
+    [regex]::new('(?<n>\\?"' + $SecretName + '\\?")(?<s>\s*:\s*)(?<v>\\?"(?:[^"\\]|\\(?!"))*\\?"|[^\s,}\]]+)', 'IgnoreCase'),
+    # Cookie: and Authorization: headers
+    [regex]::new('(?<![\w-])(?<n>(?:set-)?cookie|authorization)(?<s>\s*:\s*)(?<v>[^"''\r\n]+)', 'IgnoreCase')
+)
+function Hide-Secret([string]$s) {
+    if (-not $s) { return $s }
+    foreach ($rx in $SecretRx) {
+        $s = $rx.Replace($s, [Text.RegularExpressions.MatchEvaluator] {
+            param($m)
+            $v = $m.Groups['v'].Value; $q = ''
+            foreach ($c in '\"', '"', "'") { if ($v.StartsWith($c)) { $q = $c; break } }
+            $close = $(if ($q -and $v.Length -gt $q.Length -and $v.EndsWith($q)) { $q } else { '' })
+            $m.Groups['n'].Value + $m.Groups['s'].Value + $q + '<redacted>' + $close })
+    }
+    $s
 }
 function Get-Items([string]$cat) {
     # @() over a List[object] throws 'Argument types do not match' in Windows PowerShell 5.1.
@@ -488,7 +523,7 @@ Invoke-Section 'services' {
                 $rec = [ordered]@{ reset_period = $null; command_line = $null; actions = @() }
                 foreach ($ln in $q.Lines) {
                     if ($ln -match 'RESET_PERIOD[^:]*:\s*(\d+)') { $rec.reset_period = [int64]$Matches[1] }
-                    elseif ($ln -match 'COMMAND_LINE\s*:\s*(.*)$') { $rec.command_line = $Matches[1].Trim() }
+                    elseif ($ln -match 'COMMAND_LINE\s*:\s*(.*)$') { $rec.command_line = Hide-Secret $Matches[1].Trim() }
                     elseif ($ln -match '(RESTART|RUN PROCESS|REBOOT)\s*--\s*Delay\s*=\s*(\d+)') { $rec.actions += "$($Matches[1])@$($Matches[2])ms" }
                 }
                 $o.recovery = $rec
@@ -591,6 +626,11 @@ Invoke-Section 'files' {
                     $subdirs.Add($e.FullName); continue
                 }
                 $stats.files++; $stats.bytes += $e.Length
+                if ($e.Length -eq 0 -and ($e.Attributes -band [IO.FileAttributes]::ReadOnly)) {
+                    # A 0-byte read-only file is the placeholder that replaces a component folder (dir-placeholder-file).
+                    $sddl = $null; try { $sddl = (Get-Acl -LiteralPath $e.FullName).Sddl } catch { }
+                    Add-Item 'placeholders' ([ordered]@{ key = "placeholder|$($e.FullName.ToLowerInvariant())"; path = $e.FullName; root = $r.path; rel = $rel; kind = 'file'; sddl = $sddl; attributes = $e.Attributes.ToString() })
+                }
                 $extKey = $(if ($ext) { $ext } else { '(none)' })
                 if ($stats.by_ext.Contains($extKey)) { $stats.by_ext[$extKey]++ } else { $stats.by_ext[$extKey] = 1 }
                 # Half-applied update: X.new / X.old next to X, or a new_X.exe / X_new.exe swap next to X.exe.
@@ -792,11 +832,12 @@ Invoke-Section 'processes' {
         $parent = $byPid[[int]$p.ParentProcessId]
         # A parent created after the child is a reused PID, not the real parent.
         if ($parent -and $parent.CreationDate -and $p.CreationDate -and $parent.CreationDate -gt $p.CreationDate) { $parent = $null }
-        $norm = ''; if ($p.CommandLine) { $norm = ($p.CommandLine.ToLowerInvariant() -replace '\d+', '#') }
+        $cmd = Hide-Secret $p.CommandLine   # the key is built from it too, so no token reaches the snapshot
+        $norm = ''; if ($cmd) { $norm = ($cmd.ToLowerInvariant() -replace '\d+', '#') }
         $k = "proc|$(if ($p.ExecutablePath) { $p.ExecutablePath.ToLowerInvariant() } else { $p.Name.ToLowerInvariant() })|$norm"
         if ($seen.ContainsKey($k)) { $seen[$k]++; $k = "$k#$($seen[$k])" } else { $seen[$k] = 1 }
         Add-Item 'processes' ([ordered]@{
-            key = $k; pid = [int]$p.ProcessId; name = $p.Name; path = $p.ExecutablePath; command_line = $p.CommandLine; match = $kind
+            key = $k; pid = [int]$p.ProcessId; name = $p.Name; path = $p.ExecutablePath; command_line = $cmd; match = $kind
             parent_pid = [int]$p.ParentProcessId; parent_name = $(if ($parent) { $parent.Name }); parent_path = $(if ($parent) { $parent.ExecutablePath })
             session = $p.SessionId; threads = $p.ThreadCount; created = $(if ($p.CreationDate) { $p.CreationDate.ToUniversalTime().ToString('o') })
             machine = $(if ($p.ExecutablePath) { Get-PeMachine $p.ExecutablePath }); modules_from_roots = @(); windows = @()
@@ -858,7 +899,7 @@ Invoke-Section 'tasks' {
         foreach ($a in @($t.Actions)) {
             $cls = $a.CimClass.CimClassName
             if ($cls -eq 'MSFT_TaskExecAction') {
-                $acts += [ordered]@{ type = 'exec'; execute = $a.Execute; arguments = $a.Arguments; workdir = $a.WorkingDirectory }
+                $acts += [ordered]@{ type = 'exec'; execute = $a.Execute; arguments = (Hide-Secret $a.Arguments); workdir = $a.WorkingDirectory }
                 if (-not $kind) { $kind = Get-RefKind "$($a.Execute) $($a.Arguments) $($a.WorkingDirectory)" -Names }
             } elseif ($cls -eq 'MSFT_TaskComHandlerAction') {
                 $acts += [ordered]@{ type = 'com'; class_id = $a.ClassId; data = $a.Data }
@@ -904,7 +945,7 @@ Invoke-Section 'autostart' {
             if (-not $kind) { continue }
             $sub = $(if ($r[0] -eq 'HKLM32') { 'Run32' } else { 'Run' })
             $ap = $approved["$(if ($r[0] -eq 'HKCU') { 'HKCU' } else { 'HKLM64' })|$sub|$($n.ToLowerInvariant())"]
-            Add-Item 'run_keys' ([ordered]@{ key = "run|$($r[0])|$($r[1])|$n".ToLowerInvariant(); scope = $r[0]; path = $r[1]; name = $n; value = $v; match = $kind; startup_approved = $ap })
+            Add-Item 'run_keys' ([ordered]@{ key = "run|$($r[0])|$($r[1])|$n".ToLowerInvariant(); scope = $r[0]; path = $r[1]; name = $n; value = (Hide-Secret $v); match = $kind; startup_approved = $ap })
         }
         $k.Close()
     }
@@ -1287,7 +1328,7 @@ Invoke-Section 'shortcuts' {
             $kind = Get-RefKind "$target $args_" -Names
             if (-not $kind -and $s[0] -eq 'startup' -and $script:AppRx -and $script:AppRx.IsMatch($f.Name)) { $kind = 'app' }
             if (-not $kind) { continue }
-            Add-Item 'shortcuts' ([ordered]@{ key = "lnk|$($s[0])|$($f.FullName.ToLowerInvariant())"; location = $s[0]; path = $f.FullName; target = $target; arguments = $args_; match = $kind })
+            Add-Item 'shortcuts' ([ordered]@{ key = "lnk|$($s[0])|$($f.FullName.ToLowerInvariant())"; location = $s[0]; path = $f.FullName; target = $target; arguments = (Hide-Secret $args_); match = $kind })
         }
     }
     $Snap.coverage['startup_folder_total'] = $startupTotal

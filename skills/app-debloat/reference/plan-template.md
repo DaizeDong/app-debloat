@@ -66,6 +66,8 @@ Must contain a matrix with one row per known path from the ledger's `L-RI` entri
 | Installer re-run (L-RI-006) | user, manual | none; documented | user re-runs `-Install` | proposed |
 
 Must also state:
+- **Deferred while running**: every action that is skipped while the app runs (`onlyWhenNotRunning`, or a hook that skips while the app is running), each with its gap stated: the watch task re-asserts it only on a run that happens to find the app closed, so a setting the app rewrites while it runs can stay reverted for that long. Say whether the app keeps running after its window is closed (background or tray mode, observed at P1 with `launch_monitor.ps1` and `shot_windows.ps1`); if it does, the gap lasts until the app is fully exited or the machine restarts, and say how the owner closes it fully.
+  Example: `A-11 floating-ball off (hook, skips while running) | app stays in the tray after its window closes (L-INV-021) | re-asserted only at a logon or 6-hourly run that finds it closed | gap: open`
 - **Version drift**: the supported version range (only versions actually inspected), what happens on an unknown version (blocking actions stay inactive until P1 to P3 are re-run, or the user passes an explicit force switch), and how the fingerprint change is reported.
 - **Path drift**: which targets are resolved by name or registry pointer at run time rather than fixed path, and what the script does when a target disappears or moves (skip with a warning, never widen the match).
 - Paths with no control are listed as open, not hidden.
@@ -106,5 +108,6 @@ Must contain:
 - Section 5 states the security-update cost for every blocked updater of a browser engine or network-facing component.
 - Every `keep` and every untouched candidate has a reason and IDs.
 - Every return path in the ledger appears in the durability matrix.
+- Every action deferred while the app runs is listed in section 3 with its gap, and section 3 says whether the app keeps running after its window is closed.
 - Every action has original state, ownership, undo with a conflict rule, and a place in the rollback order.
 - No sentence claims complete blocking without a `VER` entry behind it.

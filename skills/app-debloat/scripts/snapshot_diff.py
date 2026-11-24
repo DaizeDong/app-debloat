@@ -23,14 +23,28 @@ When a root's binary fingerprint changes, the changed, removed and added binarie
 listed under the warning. Exit code 0 always; the diff is evidence, not a verdict.
 
 Planned changes (after an apply):
-  --journal FILE         the engine's journal.jsonl. Active entries (not undone) mark as expected:
-                         files and folders replaced by a placeholder (file2dir, dir2file) and
-                         everything under them, the placeholders themselves, ACL changes on those
-                         paths, and the tasks, services, firewall rules and IFEO entries it wrote.
+  --journal FILE         the engine's journal.jsonl. Each active entry (not undone) explains only its
+                         own effect, so a vendor change to the same object still shows:
+                           service    a start-mode change to Disabled (Running to Stopped is not compared)
+                           task       a state change to Disabled
+                           firewall   the rule added
+                           ifeo       the Debugger value added (a new key holding only it, or a new value)
+                           file2dir, dir2file  the removal of the file or folder (with everything under
+                                      it) and a placeholders item of the primitive's kind (directory
+                                      for file2dir, file for dir2file) appearing at that path. That
+                                      placeholder disappearing, or a real file back at its path, stays
+                                      unexplained
+                           acl        an sddl change on that path (with emptyFirst, removals under it)
+                           watchtask  the tool's own <Prefix>Debloat-Watch task added (labelled self)
+                         A service, task, firewall rule or IFEO entry that was removed or added, or that
+                         changed in any other field, stays unexplained.
   --expect-removed FILE  one planned path per line (# comments, %VAR% tokens and * ? globs allowed);
-                         the path and everything under it count as planned removals or placeholders.
-  Expected items move to "expected" in each category and are not counted as added/removed/changed.
-  The fingerprint warning fires only when a root has a binary change that no plan explains.
+                         the removal of the path and everything under it, and a placeholders item of
+                         either kind appearing at that path, count as planned; a placeholder that
+                         disappears from that path does not.
+  Expected items move to "expected" in each category (each with planned_by) and are not counted as
+  added/removed/changed. The fingerprint warning fires only when a root has a binary change that no
+  plan explains; a planned removal explains a removed binary, never a changed or added one.
 
 Noise that is not reported:
   - Windows paths (keys, path, parent_path, command_line and other path-like values) are compared
@@ -49,7 +63,7 @@ import os
 import re
 import sys
 
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.3.0"
 
 GROUPS = {
     "persistence": ["installs", "services", "tasks", "run_keys", "other_autostart", "ifeo", "com", "shell_ext", "tsf",
@@ -146,44 +160,108 @@ def canon(p):
 
 
 class Plan:
-    """What an apply changed on purpose, from --journal and --expect-removed."""
+    """What an apply changed on purpose, from --journal and --expect-removed: each primitive's own effect only."""
 
     def __init__(self):
-        self.paths, self.globs, self.acl = set(), [], set()
-        self.tasks, self.services, self.firewall, self.ifeo = set(), set(), set(), set()
+        self.removed, self.removed_globs = set(), []   # removal of the path and everything under it
+        # A placeholder appearing at exactly that path: path -> its kinds ("directory", "file", or "any" when
+        # the kind is not known), and a list of (glob, kind).
+        self.placeholders, self.placeholder_globs = {}, []
+        self.acl = set()   # sddl change at exactly that path
+        self.tasks, self.self_tasks, self.services, self.firewall = set(), set(), set(), set()
+        self.ifeo = {}   # image name -> Debugger value the engine wrote
         self.sources = []
 
-    def add_path(self, p):
+    def add_path(self, p, placeholder=True, kind="any"):
         c = canon(p)
-        if c:
-            (self.globs.append(c) if ("*" in c or "?" in c) else self.paths.add(c))
+        if not c:
+            return
+        glob = "*" in c or "?" in c
+        (self.removed_globs.append(c) if glob else self.removed.add(c))
+        if placeholder:
+            if glob:
+                self.placeholder_globs.append((c, kind))
+            else:
+                self.placeholders.setdefault(c, set()).add(kind)
 
     def covers_path(self, p):
+        """True when the plan removed this path or a folder above it."""
         c = canon(p)
         if not c:
             return False
-        if any(c == e or c.startswith(e + "\\") for e in self.paths):
+        if any(c == e or c.startswith(e + "\\") for e in self.removed):
             return True
-        return any(fnmatch.fnmatchcase(c, g) or fnmatch.fnmatchcase(c, g + "\\*") for g in self.globs)
+        return any(fnmatch.fnmatchcase(c, g) or fnmatch.fnmatchcase(c, g + "\\*") for g in self.removed_globs)
 
-    def covers(self, cat, it, how):
+    def is_placeholder(self, p, kind):
+        """True when the plan puts a placeholder of this kind at exactly this path."""
+        c = canon(p)
+        if not c:
+            return False
+        kinds = set(self.placeholders.get(c, ()))
+        kinds.update(k for g, k in self.placeholder_globs if fnmatch.fnmatchcase(c, g))
+        return "any" in kinds or kind in kinds
+
+    def explain(self, cat, it, how, fields=None):
+        """The plan step that explains this added, removed or changed item, or None."""
+        fields = fields or {}
         if cat in FILE_CATS or cat == "pending_update":
-            if self.covers_path(it.get("path")):
-                return True
-            return how == "changed" and canon(it.get("path")) in self.acl
-        name = str(it.get("name") or "").lower()
+            p = it.get("path")
+            # Only a placeholders item of the primitive's kind is the plan's own placeholder. One that disappears
+            # from its path, or a real file or config back at that path, is the vendor undoing the plan.
+            own = cat == "placeholders" and self.is_placeholder(p, it.get("kind"))
+            if how == "removed" and self.covers_path(p) and not own:
+                return "planned removal"
+            if how == "added" and own:
+                return "planned placeholder"
+            if how == "changed" and canon(p) in self.acl and set(fields) <= {"sddl"}:
+                return "acl"
+            return None
         if cat == "tasks":
-            return str(it.get("key") or "").lower() in self.tasks
+            k = str(it.get("key") or "").lower()
+            if how == "added" and k in self.self_tasks:
+                return "self"
+            if how == "changed" and k in self.tasks and set(fields) == {"state"} \
+                    and str(fields["state"][1]).lower() == "disabled":
+                return "task disabled"
+            return None
         if cat == "services":
-            return name in self.services
+            name = str(it.get("name") or "").lower()
+            if how == "changed" and name in self.services and set(fields) <= {"start_mode", "state"} \
+                    and "start_mode" in fields and str(fields["start_mode"][1]).lower() == "disabled" \
+                    and ("state" not in fields or [str(x).lower() for x in fields["state"]] == ["running", "stopped"]):
+                return "service disabled"
+            return None
         if cat == "firewall":
-            return name in self.firewall or str(it.get("id") or "").lower() in self.firewall
+            if how == "added" and (str(it.get("name") or "").lower() in self.firewall
+                                   or str(it.get("id") or "").lower() in self.firewall):
+                return "firewall rule added"
+            return None
         if cat == "ifeo":
-            return str(it.get("image") or "").lower() in self.ifeo
-        return False
+            img = str(it.get("image") or "").lower()
+            if img not in self.ifeo or it.get("kind", "ifeo") != "ifeo":
+                return None
+            want = self.ifeo[img]
+
+            def debugger_only(before, after):
+                b = {str(k).lower(): v for k, v in (before or {}).items()}
+                a = {str(k).lower(): v for k, v in (after or {}).items()}
+                if "debugger" in b or "debugger" not in a:
+                    return False
+                if want is not None and str(a["debugger"]).lower() != str(want).lower():
+                    return False
+                return {k: v for k, v in a.items() if k != "debugger"} == b
+
+            if how == "added" and not it.get("filters") and debugger_only({}, it.get("values")):
+                return "ifeo debugger added"
+            if how == "changed" and set(fields) == {"values"} and debugger_only(*fields["values"]):
+                return "ifeo debugger added"
+            return None
+        return None
 
     def __bool__(self):
-        return bool(self.paths or self.globs or self.acl or self.tasks or self.services or self.firewall or self.ifeo)
+        return bool(self.removed or self.removed_globs or self.placeholders or self.acl or self.tasks
+                    or self.self_tasks or self.services or self.firewall or self.ifeo)
 
 
 def load_journal(path, plan):
@@ -199,26 +277,39 @@ def load_journal(path, plan):
             except ValueError:
                 sys.exit(f"snapshot_diff: {path} line {n} is not JSON")
             k = str(e.get("key"))
-            if e.get("kind", "change") == "undone":
+            kind = e.get("kind", "change")
+            if kind == "note":
+                continue
+            if kind == "undone":
                 active.pop(k, None)
+            elif k in active:
+                # the engine keeps the first original and the latest after-state and data
+                active[k]["after"], active[k]["data"] = e.get("after"), e.get("data")
             else:
-                active.setdefault(k, e)
+                active[k] = dict(e)
     counts = {}
     for k, e in active.items():
-        prim, d = e.get("prim"), e.get("data") or {}
+        prim, d, af = e.get("prim"), e.get("data") or {}, e.get("after") or {}
         if prim in ("file2dir", "dir2file"):
-            plan.add_path(d.get("path") or (k[3:] if k.startswith("fs:") else None))
+            plan.add_path(d.get("path") or (k[3:] if k.startswith("fs:") else None),
+                          kind="directory" if prim == "file2dir" else "file")
         elif prim == "acl":
             if d.get("path"):
                 plan.acl.add(canon(d["path"]))
+                if d.get("emptyFirst"):
+                    plan.add_path(d["path"] + "\\*", placeholder=False)
         elif prim == "task":
             plan.tasks.add(f"task|{d.get('path') or ''}{d.get('name') or ''}".lower())
+        elif prim == "watchtask":
+            name = d.get("name") or (k[len("watchtask:"):] if k.startswith("watchtask:") else "")
+            if name:
+                plan.self_tasks.add(("task|\\" + name).lower())
         elif prim == "service":
             plan.services.add(str(d.get("name") or k[4:]).lower())
         elif prim == "firewall":
             plan.firewall.add(str(d.get("name") or k[3:]).lower())
         elif prim == "ifeo":
-            plan.ifeo.add(str(d.get("name") or k[5:]).lower())
+            plan.ifeo[str(d.get("name") or k[5:]).lower()] = af.get("debugger") if isinstance(af, dict) else None
         else:
             continue
         counts[prim] = counts.get(prim, 0) + 1
@@ -238,6 +329,9 @@ def load_expect(path, plan):
 
 def brief(cat, it):
     """One short label per item for the text summary."""
+    if cat == "tasks" and it.get("name"):
+        label = f"{it.get('path') or ''}{it['name']}"
+        return label + (" (self)" if it.get("planned_by") == "self" else "")
     for f in ("path", "name", "image", "aumid", "verb", "handler", "clsid", "entry", "display_name", "ext", "id",
               "uninstall_key"):
         if it.get(f):
@@ -309,13 +403,11 @@ def fingerprint_changes(A, B, capped_roots, plan):
         fc = {"root": p, "before": va, "after": vb, "capped": pl in capped_roots,
               "changed_files": changed, "removed_files": removed, "added_files": added, "explained": False}
         if plan:
-            planned = {t: [r for r in lst if plan.covers_path(r.get("path"))]
-                       for t, lst in (("changed", changed), ("removed", removed), ("added", added))}
+            # A placeholder replaces a binary: it explains the binary's removal, never a changed or added one.
+            planned = {"changed": [], "removed": [r for r in removed if plan.covers_path(r.get("path"))], "added": []}
             fc["planned"] = {t: len(v) for t, v in planned.items()}
             fc["planned_files"] = planned
-            fc["changed_files"] = [r for r in changed if not plan.covers_path(r.get("path"))]
             fc["removed_files"] = [r for r in removed if not plan.covers_path(r.get("path"))]
-            fc["added_files"] = [r for r in added if not plan.covers_path(r.get("path"))]
             # Explained only when every binary difference is planned and the lists are complete (not capped).
             fc["explained"] = (not fc["capped"] and any(planned.values())
                                and not (fc["changed_files"] or fc["removed_files"] or fc["added_files"]))
@@ -422,14 +514,19 @@ def main():
                 changed.append({"key": k, "fields": ch, "item": ib[k]})
         expected = None
         if plan:
-            exp = {"added": [it for it in added if plan.covers(cat, it, "added")],
-                   "removed": [it for it in removed if plan.covers(cat, it, "removed")],
-                   "changed": [c for c in changed if plan.covers(cat, c["item"], "changed")]}
+            exp = {"added": [], "removed": [], "changed": []}
+            keep = {"added": [], "removed": [], "changed": []}
+            for how, lst in (("added", added), ("removed", removed), ("changed", changed)):
+                for x in lst:
+                    it = x["item"] if how == "changed" else x
+                    why = plan.explain(cat, it, how, x["fields"] if how == "changed" else None)
+                    if why:
+                        exp[how].append(dict(x, planned_by=why))
+                    else:
+                        keep[how].append(x)
             if any(exp.values()):
                 expected = exp
-                added = [it for it in added if not plan.covers(cat, it, "added")]
-                removed = [it for it in removed if not plan.covers(cat, it, "removed")]
-                changed = [c for c in changed if not plan.covers(cat, c["item"], "changed")]
+                added, removed, changed = keep["added"], keep["removed"], keep["changed"]
         if added or removed or changed or capped or expected:
             result["categories"][cat] = {"added": added, "removed": removed, "changed": changed}
             if capped:
@@ -533,9 +630,11 @@ def main():
                 lines.append(f"     ... {total - shown} more in the JSON")
             if exp:
                 rows = [("+", it) for it in exp["added"]] + [("-", it) for it in exp["removed"]] + \
-                       [("~", c["item"]) for c in exp["changed"]]
+                       [("~", dict(c["item"], planned_by=c["planned_by"])) for c in exp["changed"]]
                 for tag, it in rows[:args.max_lines]:
-                    lines.append(f"     planned {tag} {brief(cat, it)}")
+                    label = brief(cat, it)
+                    why = "" if label.endswith("(self)") else f" ({it['planned_by']})"
+                    lines.append(f"     planned {tag} {label}{why}")
                 if len(rows) > args.max_lines:
                     lines.append(f"     ... {len(rows) - args.max_lines} more planned in the JSON")
         say(f"{group}: {'no change' if not lines else ''}".rstrip())

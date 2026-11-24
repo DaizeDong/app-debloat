@@ -169,20 +169,62 @@ exists, and CONFLICT (left untouched) for anything else.
 |---|---|---|---|
 | `service-disable` | `target[]` names, `stop` | `sc config start= disabled`, stops it if running | if still Disabled, restores Auto (delayed-auto kept) or Manual |
 | `task-disable` | `target[]` `\Path\Name*` (that folder only), or `taskPath` (a folder, searched with all its subfolders) plus `target[]` name patterns (default `*`) | disables matching tasks; records each task's action identity (Execute, Arguments, ClassId). Every search prints its match count | re-enables only if the task still runs the recorded action |
-| `file-placeholder-dir` | `target[]`, `stopHosts[]`, `createIfMissing`, `backup` | copies the file to `backup\` (hash-checked), stops processes by full path, deletes the file, creates a same-named folder (a repairer cannot write the file back) | if the folder is still empty: removes it and restores the file from the backup; without a backup it is listed for reinstall |
-| `dir-placeholder-file` | `target[]`, `checkLoaded` (default true), `stopHosts[]`, `createIfMissing`, `backup` | stops the `stopHosts` processes by full path, re-checks loaded modules, copies the folder to `backup\` (file count checked), replaces it with an empty read-only file; deferred with WARN while any module under the folder is loaded or the check is incomplete (see Loaded-Module Check). Set `backup: false` for very large folders | if the file is still empty: removes it and restores the folder from the backup, else lists it for reinstall |
-| `acl-deny-write` | `target[]`, `principal` (`CurrentUser`, `Users`, SID), `emptyFirst`, `createIfMissing` | adds exactly the missing deny rights (WriteData, AppendData, WriteEA, WriteAttributes; inherited by children on folders) for that SID; records which rights it added | takes away exactly those rights from that SID's entry with the same inheritance; other deny entries and rights stay; removes a folder it created |
+| `file-placeholder-dir` | `target[]`, `stopHosts[]`, `createIfMissing`, `backup` | copies the file to `backup\` (hash-checked), stops processes by full path, deletes the file, creates a same-named folder (a repairer cannot write the file back). On a re-assert over a file the vendor wrote back, a build whose SHA-256 differs from the journal's first original is first copied to `backup\<key16>.<sha8>.bin` and logged as `WARN vendor restored a different build (sha256 <8>, file version <v>)`; the same build keeps no copy. A placeholder deleted since it was placed is re-created (see Placeholders That Disappear) | if the folder is still empty: removes it and restores the file from the backup; without a backup it is listed for reinstall |
+| `dir-placeholder-file` | `target[]`, `checkLoaded` (default true), `stopHosts[]`, `createIfMissing`, `backup` | stops the `stopHosts` processes by full path, re-checks loaded modules, copies the folder to `backup\` (file count checked), replaces it with an empty read-only file; deferred with WARN while any module under the folder is loaded or the check is incomplete (see Loaded-Module Check). Set `backup: false` for very large folders. A placeholder deleted since it was placed is re-created (see Placeholders That Disappear) | if the file is still empty: removes it and restores the folder from the backup, else lists it for reinstall |
+| `acl-deny-write` | `target[]`, `principal` (`CurrentUser`, `Users`, SID), `rights` (`write` default, or `write+protect`), `emptyFirst`, `createIfMissing` | adds exactly the missing deny rights for that SID (inherited by children on folders) and records them: `write` is WriteData, AppendData, WriteEA, WriteAttributes; `write+protect` adds Delete, DeleteSubdirectoriesAndFiles, ChangePermissions and TakeOwnership, and is refused unless the target's owner is Administrators (see acl-deny-write and Placeholders) | takes away exactly the rights the tool added (all journal lines of the key together) from that SID's entry with the same inheritance; other deny entries and rights stay; removes a folder it created |
 | `ifeo-block` | `target[]` bare exe names | IFEO `Debugger` = `%SystemRoot%\System32\AppDebloat-blocked\<id>.exe` (never exists) | deletes only its own Debugger value, the key only if it created it |
 | `reg-set` | `target` key, `name`+`value` or `values{}`, `kind` (DWord, QWord, String, ExpandString, MultiString), `view` | sets values, records the old ones | restores or deletes each value |
 | `reg-delete-key` | `target[]`, optional `match` regex over subkeys, `view` | `reg export` to the state folder, then deletes; TrustedInstaller-owned keys are a WARN, not a FAIL (a known failure when `knownFailure` covers the key) | `reg import`, unless the key exists again (CONFLICT) |
 | `shellext-block` | `clsids[]`, `handlerMatch`, `handlerParents[]`, `removeClsid`, `label` | `Shell Extensions\Blocked` values, deletes the CLSID keys and matching ContextMenuHandlers (HKLM and HKCU, 64-bit and WOW6432Node). A handler key whose name or default value is the CLSID with a trailing `-` (the vendor's own off switch) counts as the same CLSID | removes Blocked values, imports deleted keys |
 | `toast-off` | `target[]` AppUserModelIDs (wildcards match existing) | `Notifications\Settings\<id>` `Enabled=0` | restores |
-| `firewall-block-program` | `target[]` program paths, `direction` | rule `AppDebloat <id> <action> <exe> <hash>` in group `AppDebloat-<id>` | removes that rule only if its group and program are still the recorded ones |
+| `firewall-block-program` | `target[]` program paths, `direction` | rule `AppDebloat <id> <action> <exe> <hash>` in group `AppDebloat-<id>`. When a target program is gone but its rule still exists (a literal target, or a journaled program a glob target still names), the SKIP line says `rule <name> still present; -Uninstall removes it, or drop the target and rebuild`; the rule is never removed by a plan | removes that rule only if its group and program are still the recorded ones |
 | `hosts-block` | `target[]` domains, `acknowledgeFlagging` | discouraged, always printed as WARN; skipped unless acknowledged; refuses Microsoft domains | removes exactly the lines it added; the rest of the file is kept byte for byte |
 | `preboot-file-edit` | `target[]` INI glob, `section`, `set{}`, `dropFromSections[]` | for settings the app keeps in shared memory and flushes back on exit: registers a one-shot SYSTEM startup task that edits the file before logon and deletes itself after success | cancels a pending edit (if the task still runs the recorded script), or schedules a restore before next logon for each file whose values are still exactly the written ones |
 | `ini-set` | `path` (tokens, globs), `section`, `key`, `value` (string or number; `null` removes the key), `encoding`, `onlyWhenNotRunning[]` | for an INI the app reads at start: sets (or adds, or removes) one key, via a temp file and `Replace`; journals the original value and whether the section existed. Deferred with WARN while an `onlyWhenNotRunning` exe runs | only while the key still has the written value: puts the original back (or removes the key, and the section if the tool created it) |
 | `json-set` | `path` (tokens, globs), `pointer` (JSON pointer, `/a/b~1c`), `value` (any JSON), `onlyWhenNotRunning[]` | replaces exactly the value at the pointer, or adds the missing member (and missing parent objects) at the start of the deepest existing object; the rest of the file is kept byte for byte. Deferred with WARN while an `onlyWhenNotRunning` exe runs | only while the value still equals what the tool wrote: puts the original text back, or removes the member it added |
 | `hook` | `hook` name, `args{}` | app-specific logic, see below | the hook's `Undo` |
+
+**Placeholders That Disappear.** A cleaner, an updater or the user may delete a placeholder folder or file. A glob
+target resolves only against items that exist, and without `createIfMissing` a missing literal target plans
+nothing, so such a block used to lapse with `0 change(s), 0 failure(s)` and no other sign. The plan therefore also
+reads the active journal entries of the action: every `file2dir` or `dir2file` entry whose path is now missing is
+planned again (`Re-create placeholder directory (deleted since it was placed): <path>`) in every mode, with the kind
+taken from the entry's after-state and the same `fs:` key, so the journal keeps its first original (an identical
+after-state adds no line) and the re-create counts as a change in `history.log`. It is re-created only when its
+parent folder still exists, because a placeholder is made with `New-Item -Force`, which would rebuild an old version
+folder the vendor removed; otherwise the plan prints `SKIP <path>: parent gone (version moved?)`. A path that no
+current target of the action names any more (the target was dropped from the manifest) is not re-created either and
+gets its own SKIP line; a path the safety rules now refuse is a WARN. With `createIfMissing`, a literal target
+journaled under this action goes the same way instead of being pre-created again; one journaled under another action
+id (an action renamed or merged in a rebuilt manifest) is pre-created as before, since this step reads only the
+action's own entries.
+
+**acl-deny-write and Placeholders.** A deny entry for the user's SID binds the elevated token too, because it carries
+the same user SID: an `acl-deny-write` on `AutoUpdate\` makes `Access to the path 'Autoupdate.exe' is denied` for the
+engine's own attempt to put a placeholder inside it. Before a placeholder inside a folder is created or removed
+(apply and `-Uninstall`), the engine finds the active `acl:<path>|<sid>` journal entries whose path is the parent or
+an ancestor, takes away exactly the journaled rights that are present (`Set-AdDenyAce -Remove`), changes the
+placeholder, and puts the same rights back in a `finally` block. A `kind: "note"` journal line written first names
+the lift (`lifted: ["acl:<path>|<sid> rights <n>"]`), and the run prints an INFO line. If the rights cannot be put
+back, the item fails and the `acl-deny-write` action re-adds them on its next run.
+
+**rights: write+protect.** The default deny (`write`, rights 278) leaves Delete, DeleteSubdirectoriesAndFiles,
+WRITE_DAC and WRITE_OWNER to the user, so a normal user process can delete a placeholder in that folder and strip the
+deny entry. `"rights": "write+protect"` also denies those four. The owner of an object keeps an implicit WRITE_DAC
+that no deny entry removes, and only an enabled SID counts as owner, so the option is accepted only when the
+target's owner is Administrators (`S-1-5-32-544`): the elevated tool, which holds Administrators enabled, can then
+still lift and undo exactly its own rights, while the user's filtered token, where Administrators is deny-only,
+cannot. An owner that is the denied SID could strip the entry, and a SYSTEM, TrustedInstaller or user owner would
+lock the elevated tool out of its own entry, so both are refused (plan-time FAIL; a folder that `createIfMissing`
+creates is checked right after it is created). The trade-off: the user can no longer delete or clean anything in
+that folder, and the engine has to lift its own entry to re-create a placeholder inside it (above). Switching an
+existing entry from `write` to `write+protect` adds only the missing rights; the new journal line's after-state
+holds every right the tool has added for that key, so `-Uninstall` removes all of them.
+
+```json
+{ "id": "updater-dir", "type": "acl-deny-write", "category": "updater", "rationale": ["L-R4"], "evidence": "observed",
+  "principal": "CurrentUser", "rights": "write+protect", "target": ["{root}\\AutoUpdate"], "reapply": true }
+```
 
 **Task Folders.** A `target` such as `\VendorUpdate*` searches only the root folder, so it cannot find tasks that a
 Chromium-style updater registers under `\VendorUpdaterSystem\VendorUpdater\`. Use `taskPath` for those: it
@@ -281,16 +323,28 @@ and take only the whole-action form. A failure while the plan is built (before a
 only under the whole-action form; with `targets` it stays a FAIL, since no target names it.
 
 Every run (dry run included) lists the action under `Known Failures` as a WARN naming the reason and its targets,
-so it is never forgotten. Each planned item it covers is marked `known to fail (ref ...)`, and the plan counts them
+so it is never forgotten. When the knownFailure covered no planned item this run and nothing failed or warned while
+the action's plan was built (the vendor removed the updater it was about, for example), the WARN becomes
+
+```
+[INFO] knownFailure L-R2 on updater-svc covered nothing this run (targets not present or already in place); remove it from the manifest
+```
+
+except for `task-disable` in a run without elevation, which cannot see SYSTEM tasks. A plan that deferred its target
+with a WARN (a `dir-placeholder-file` folder with loaded or uninspectable modules, an `ifeo-block` exe with another
+Debugger) keeps the WARN, since the knownFailure still applies. Each planned item it covers is marked `known to fail (ref ...)`, and the plan counts them
 apart: `Plan: 4 change(s), 1 of them known to fail` and, at the end of a dry run,
 `4 change(s) planned, 1 of them known to fail`. When a covered item fails, at plan time or while applying, the
 failure is logged as `[WARN] [id] known failure (ref ...): reason :: item :: error` and counted as a known failure,
 neither as a failure nor as a warning: it does not set exit code 1 and does not stop `-Install`. When a covered item
 succeeds, an INFO line says to remove `knownFailure` once it stays fixed. The `-Auto` line in `history.log` stays
-compact; it names each action once with its count, and the full text stays in `auto.log`:
+compact; it names each action once with its count, and the full text stays in `auto.log`. Other failures follow as
+`FAIL: <item :: error>` (unique, each cut to about 200 characters, joined by ` | `) and then the WARN text, so a
+failure can be read without opening `auto.log`:
 
 ```
-2030-01-01T06:00:00 engine 1.4.0 fabrikam-drive 5.3.1|FabrikamDrive: 0 change(s), 0 failure(s), 1 known failure(s) [updater-svc x1, ref L-R2]
+2030-01-01T06:00:00 engine 1.5.0 fabrikam-drive 5.3.1|FabrikamDrive: 0 change(s), 0 failure(s), 1 known failure(s) [updater-svc x1, ref L-R2]
+2030-01-01T12:00:00 engine 1.5.0 fabrikam-drive 5.3.1|FabrikamDrive: 0 change(s), 1 failure(s), 0 known failure(s) FAIL: Pre-create placeholder directory (blocks re-download): C:\...\app-update.yml :: Access to the path 'app-update.yml' is denied.
 ```
 
 A failing `sc.exe` is reported without throwing, so a handled failure leaves no `TerminatingError` in the `auto.log`
@@ -302,7 +356,11 @@ access-denied diagnostics (below) were read; never use it to hide a failure nobo
 When a change is refused with access denied (any language: HRESULT 0x80070005, Win32 error 5, the exception type
 or the PermissionDenied category), the engine prints a read-only diagnostic block after the FAIL:
 
-- service: its security descriptor (`sc sdshow`) and protection level (`sc qprotection`);
+- service: its security descriptor (`sc sdshow`), its protection level (`sc qprotection`), and the System log
+  event 7006 of the Service Control Manager within 5 s of the failure (`Get-WinEvent -FilterHashtable`, readable
+  without elevation). `The ScRegSetValueExW call failed for Start ... Access is denied`, logged in pairs at every
+  attempt, means the denial hit the service's `Start` registry value, not the service's own permissions. The event
+  names no service, so it is matched by time only;
 - registry (`reg-set`, `reg-delete-key`, `ifeo-block`, `shellext-block`): the key's owner and SDDL;
 - file or folder (placeholders, ACL, INI and JSON edits): owner, attributes and SDDL;
 - scheduled task: state, author and principal;
@@ -311,7 +369,9 @@ or the PermissionDenied category), the engine prints a read-only diagnostic bloc
 
 A security suite can veto a change per item even when the permissions and protection level allow it. The engine
 never works around a denial (no ownership change, no ACL rewrite, no retry as another account): record it as
-`knownFailure` and use another lever (`reference/levers.md`). Items a `knownFailure` covers skip the block.
+`knownFailure` and use another lever (`reference/levers.md`). Items a `knownFailure` covers skip the block. Lifting
+the tool's own deny entries around a placeholder change (acl-deny-write and Placeholders) is not such a workaround:
+it touches only rights the journal shows the tool added, and puts them back.
 
 ## Loaded-Module Check
 
@@ -331,7 +391,10 @@ resolved first). A DLL of the same file name loaded from somewhere else does not
   (`LsaIso.exe`, `NgcIso.exe`, VBS trustlets present whenever VBS or Credential Guard is on) and VM memory processes
   (`vmmem*`, such as `vmmemCmZygote`); and any process unreadable with error 998 whose image is under System32. The
   last two kinds are exempted only when the image is unknown or under System32, so an app process that borrows the
-  name is still checked. Each run prints which processes were exempted:
+  name is still checked. A process whose snapshot failed with error 87 or 18 (or 299 after the retries) usually
+  exited during the snapshot (an agent's short-lived shell, for example): it is left out when its PID no longer
+  exists, it has exited, or the PID now has another start time, and it stays unknown only while it still runs. Each
+  run prints which processes were exempted:
 
 ```
 [INFO] loaded-module check exempted (cannot load app code): LsaIso (PID 1376, error 5: isolated security process (VBS trustlet)); ...
@@ -383,7 +446,7 @@ derive it at run time from the user's own install and keep it in memory.
 | (none) | dry run: resolves, prints the header (root, how it was found, identity), the numbered plan (items a `knownFailure` covers are marked and counted apart), the inactive actions and the options not selected; changes nothing, needs no elevation (task searches then say what they cannot see, see Task Folders) |
 | `-Apply` | builds the same plan, prints it, then executes exactly those items |
 | `-Install` | refuses if a task named `<Prefix>Debloat-Watch` exists that the journal does not record; applies the plan first; then, only when the apply had no failures (known failures do not count), copies the script to `%ProgramData%\AppDebloat\<id>\<Prefix>Debloat.ps1` (SYSTEM and Administrators full, Users read), saves options to `options.json`, journals and registers `<Prefix>Debloat-Watch` (logon + every 6 h, current user, highest, `conhost --headless`). After a failed apply it registers nothing, prints `Watch task NOT registered` with the reason and exits 1 |
-| `-Auto` | used by the watch task: saved options, only `reapply: true` actions, transcript to `auto.log`, one line per run in `history.log` (changes, failures, known failures as `[action-id xN, ref R]`, other WARN text, fingerprint changes, refusals) |
+| `-Auto` | used by the watch task: saved options, only `reapply: true` actions (placeholders deleted since they were placed are re-created, see Placeholders That Disappear), transcript to `auto.log`, one line per run in `history.log` (changes, failures, known failures as `[action-id xN, ref R]`, the FAIL text as `FAIL: <item :: error>` cut to about 200 characters each, other WARN text, fingerprint changes, refusals) |
 | `-Uninstall` | replays the journal in reverse (see below), prints the vendor files that need a reinstall; works even when the app is gone |
 
 At most one of `-Apply`, `-Install`, `-Uninstall`, `-Auto` per run: a combination is refused with exit 2 before
@@ -442,13 +505,18 @@ Install the watch task only after the core-function probe passed (P6); a task th
 - The `key` identifies the changed object (`fs:<path>`, `reg:<hive><view>\<key>|<value>`, `ifeo:<exe>`,
   `svc:<name>`, `acl:<path>|<sid>`, `ini:<path>|<section>|<key>`, `json:<path>|<pointer>`, `watchtask:<name>`, ...). The first `original` for a key wins forever: a rerun
   after the vendor reset something does not overwrite the true original. A later line for the same key only
-  updates `after` (for example when a rebuilt manifest writes a different value).
+  updates `after` (for example when a rebuilt manifest writes a different value). A placeholder re-created after it
+  was deleted reuses its key and after-state, so it adds no line. For `acl:` keys, `after.rights` holds every right
+  the tool has added for the key, and the undo removes those together with the first line's `addedRights`.
 - `kind: "undone"` closes a key after `-Uninstall` restored it cleanly.
-- `kind: "note"` records a choice, not a change (today: the processes the loaded-module check skipped by
-  `-IgnoreUninspectable` or `checkLoadedExempt`, with `actionId`, `key`, `skipped` and `patterns`); `-Uninstall`
-  ignores it.
+- `kind: "note"` records a choice or a passing step, not a change: the processes the loaded-module check skipped by
+  `-IgnoreUninspectable` or `checkLoadedExempt` (with `actionId`, `key`, `skipped` and `patterns`), and the tool's own
+  deny entries lifted for the moment to create or remove a placeholder (with `actionId`, `key` and `lifted`, see
+  acl-deny-write and Placeholders). `-Uninstall` ignores it.
 - If the run stops between the journal line and the change, the undo finds the original still in place and reports
   SKIP; a half-made change shows up as CONFLICT instead of being overwritten.
 
 Deleted registry keys are exported to `regkeys\`, replaced files and folders are copied to `backup\` before the
-journal line is written. The journal and backups are DATA: they stay on the machine and never go into a public repo.
+journal line is written, and a vendor build that differs from the first original is kept there as
+`<key16>.<sha8>.bin` before a re-assert replaces it (`-Uninstall` deletes `backup\` with the rest). The journal and
+backups are DATA: they stay on the machine and never go into a public repo.

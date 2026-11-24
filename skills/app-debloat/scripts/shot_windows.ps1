@@ -6,8 +6,8 @@
 
 .DESCRIPTION
   Read-only toward the target: it never activates, restores, moves, clicks or types into a
-  window. It only enumerates visible top-level windows, keeps those whose owning process image
-  path matches -ImagePathRegex or lies under -Root, and asks each one to paint itself into a
+  window. It enumerates top-level windows, keeps those whose owning process image path matches
+  -ImagePathRegex or lies under -Root, and asks each visible one to paint itself into a
   bitmap (PrintWindow with PW_RENDERFULLCONTENT, which also renders Chromium, Electron and
   DirectComposition content).
 
@@ -27,6 +27,18 @@
   weaker pass (reference/pipeline-apply.md, P6). A capture that comes back as one flat color is
   marked "blank" (common for windows that are hidden behind the GPU compositor or still
   loading); retake it later rather than trusting it.
+
+  IME windows are never captured and never count as the app's windows. An input method creates
+  its status bar and candidate windows inside whichever process has focus, so they match the
+  app's image path, and they can show typed text. Classes IME, MSCTFIME UI, MSCTFIME
+  Composition, CiceroUIWndFrame and SoPY_* (a third-party IME status bar), plus -SkipClassRegex,
+  are listed with skipped = 'IME window (may show typed text)' and no title.
+
+  Hidden windows: the script also counts the matching processes that are alive. Their invisible
+  top-level windows that have a title or are at least -MinSize in both directions are listed
+  with visible = false (pid, class, title), never captured, so "the app runs with only hidden
+  windows" (hidden to the tray, background mode) reads differently from "no app process". When no
+  visible window matched, the console says how many processes are alive with only hidden windows.
 
   Window titles and screenshots are real-run DATA: write -Out to the private companion, never
   into the tool repo.
@@ -53,6 +65,10 @@
   pixels) whose title matches gets tags = ['restore_pages_bubble'] in the index and in the
   console line, so it is not read as a new popup. It is still captured.
 
+.PARAMETER SkipClassRegex
+  Extra case-insensitive regex on window class names to treat as IME windows (listed, never
+  captured, not counted as app windows), for an input method the built-in list does not know.
+
 .EXAMPLE
   .\shot_windows.ps1 -Root "$env:LOCALAPPDATA\ExampleApp" -Out D:\private\shots -Tag before
   .\shot_windows.ps1 -ImagePathRegex '\\ExampleApp\\[^\\]+\.exe$' -Out D:\private\shots
@@ -64,7 +80,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Out,
     [string]$Tag,
     [int]$MinSize = 16,
-    [string]$BubbleTitleRegex
+    [string]$BubbleTitleRegex,
+    [string]$SkipClassRegex
 )
 $ErrorActionPreference = 'Stop'
 if (-not $ImagePathRegex -and -not $Root) { throw 'Pass -ImagePathRegex <regex> and/or -Root <dir>.' }
@@ -119,11 +136,13 @@ public static class AdShot {
 
     // NW, NH: the restored (normal) size, which a minimized window's own rect does not show.
     // PlFlags: WINDOWPLACEMENT.flags; WPF_RESTORETOMAXIMIZED (2) means it restores maximized, not to NW x NH.
-    public class Win { public long Hwnd; public uint Pid; public string Cls; public string Title; public bool Iconic; public bool Cloaked; public int L, T, R, B; public int VL, VT, VR, VB; public int NW, NH; public int PlFlags; }
-    public static Win[] VisibleTopLevel() {
+    public class Win { public long Hwnd; public uint Pid; public string Cls; public string Title; public bool Visible; public bool Iconic; public bool Cloaked; public int L, T, R, B; public int VL, VT, VR, VB; public int NW, NH; public int PlFlags; }
+    // Top-level windows; hidden ones too when includeHidden (they are listed, never captured).
+    public static Win[] TopLevel(bool includeHidden) {
         var res = new List<Win>();
         EnumProc cb = (h, l) => {
-            if (!IsWindowVisible(h)) return true;
+            bool vis = IsWindowVisible(h);
+            if (!vis && !includeHidden) return true;
             uint pid; GetWindowThreadProcessId(h, out pid);
             var t = new StringBuilder(512); GetWindowTextW(h, t, 512);
             var c = new StringBuilder(256); GetClassNameW(h, c, 256);
@@ -132,7 +151,7 @@ public static class AdShot {
             int cloak = 0; DwmGetWindowAttribute(h, 14, out cloak, 4);                                     // DWMWA_CLOAKED
             var wp = new WINDOWPLACEMENT(); wp.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
             if (!GetWindowPlacement(h, ref wp)) { wp.normal = new RECT(); wp.flags = 0; }
-            res.Add(new Win { Hwnd = h.ToInt64(), Pid = pid, Cls = c.ToString(), Title = t.ToString(), Iconic = IsIconic(h), Cloaked = cloak != 0,
+            res.Add(new Win { Hwnd = h.ToInt64(), Pid = pid, Cls = c.ToString(), Title = t.ToString(), Visible = vis, Iconic = IsIconic(h), Cloaked = cloak != 0,
                 L = r.L, T = r.T, R = r.R, B = r.B, VL = v.L, VT = v.T, VR = v.R, VB = v.B, NW = wp.normal.R - wp.normal.L, NH = wp.normal.B - wp.normal.T, PlFlags = wp.flags });
             return true;
         };
@@ -228,17 +247,46 @@ $outDir = [IO.Path]::GetFullPath($Out)
 [void][IO.Directory]::CreateDirectory($outDir)
 $prefix = $(if ($Tag) { ($Tag -replace '[^\w.-]', '_') + '_' } else { '' })
 
+# Input-method windows: created inside whichever process has focus, so they match the app's image path,
+# and they can show typed text. Never captured, never counted as the app's windows.
+$imeRx = New-Object regex(('^(?:IME|MSCTFIME UI|MSCTFIME Composition|CiceroUIWndFrame|SoPY_.*)$' +
+    $(if ($SkipClassRegex) { '|' + $SkipClassRegex } else { '' })), 'IgnoreCase')
+
 $imgCache = @{}
+# Matching processes that are alive, so "runs with only hidden windows" differs from "not running".
+$alive = @{}
+foreach ($pr in [Diagnostics.Process]::GetProcesses()) {
+    $id = [uint32]$pr.Id; $pr.Dispose()
+    if ($id -eq $PID -or $id -le 4) { continue }
+    if (-not $imgCache.ContainsKey($id)) { $imgCache[$id] = [AdShot]::ImagePath($id) }
+    if (Test-Match $imgCache[$id]) { $alive[[int]$id] = $true }
+}
 $index = New-Object System.Collections.Generic.List[object]
 $seq = 0
-foreach ($w in [AdShot]::VisibleTopLevel()) {
+foreach ($w in [AdShot]::TopLevel($true)) {
     if ($w.Pid -eq $PID) { continue }
     if (-not $imgCache.ContainsKey($w.Pid)) { $imgCache[$w.Pid] = [AdShot]::ImagePath($w.Pid) }
     $img = $imgCache[$w.Pid]
     if (-not (Test-Match $img)) { continue }
+    $isIme = $imeRx.IsMatch($w.Cls)
+    $small = (($w.R - $w.L) -lt $MinSize -or ($w.B - $w.T) -lt $MinSize)
+    if (-not $w.Visible) {
+        # Every GUI thread owns hidden IME windows ('Default IME'); hidden helper windows without a title or size are noise.
+        if ($isIme -or (-not $w.Title -and $small)) { continue }
+        $alive[[int]$w.Pid] = $true
+        $index.Add([ordered]@{ hwnd = ('0x{0:x}' -f $w.Hwnd); pid = [int]$w.Pid; image = $img; class = $w.Cls; title = $w.Title; visible = $false
+            rect = @($w.L, $w.T, $w.R, $w.B); skipped = 'hidden window: listed, not captured'; tags = @() })
+        continue
+    }
+    if ($isIme) {
+        $index.Add([ordered]@{ hwnd = ('0x{0:x}' -f $w.Hwnd); pid = [int]$w.Pid; image = $img; class = $w.Cls; title = $null; visible = $true; ime = $true
+            rect = @($w.L, $w.T, $w.R, $w.B); skipped = 'IME window (may show typed text)'; tags = @() })
+        continue
+    }
+    $alive[[int]$w.Pid] = $true
     $seq++
     $e = [ordered]@{
-        hwnd = ('0x{0:x}' -f $w.Hwnd); pid = [int]$w.Pid; image = $img; class = $w.Cls; title = $w.Title
+        hwnd = ('0x{0:x}' -f $w.Hwnd); pid = [int]$w.Pid; image = $img; class = $w.Cls; title = $w.Title; visible = $true
         rect = @($w.L, $w.T, $w.R, $w.B); visible_rect = @($w.VL, $w.VT, $w.VR, $w.VB)
         # A window that restores maximized gets no restored_size: its normal rect is the pre-maximize size.
         minimized = [bool]$w.Iconic; restores_maximized = $(if ($w.Iconic) { ($w.PlFlags -band 2) -ne 0 } else { $null })
@@ -248,7 +296,7 @@ foreach ($w in [AdShot]::VisibleTopLevel()) {
     }
     if ($w.Iconic) { $e.skipped = 'minimized: window present, not captured (restoring it would be input to the owner''s window)' }
     elseif ($w.Cloaked) { $e.skipped = 'cloaked by DWM' }
-    elseif (($w.R - $w.L) -lt $MinSize -or ($w.B - $w.T) -lt $MinSize) { $e.skipped = "smaller than $MinSize px" }
+    elseif ($small) { $e.skipped = "smaller than $MinSize px" }
     else {
         $cls = ($w.Cls -replace '[^\w.-]', '_'); if ($cls.Length -gt 40) { $cls = $cls.Substring(0, 40) }
         $name = '{0}{1:d2}_{2}_{3}.png' -f $prefix, $seq, $w.Pid, $cls
@@ -262,29 +310,38 @@ foreach ($w in [AdShot]::VisibleTopLevel()) {
     $index.Add($e)
 }
 
-$shot = @($index | Where-Object { $_.file }).Count
-$minN = @($index | Where-Object { $_.minimized }).Count
-$blankN = @($index | Where-Object { $_.blank }).Count
-$bubbleN = @($index | Where-Object { $_.tags -contains 'restore_pages_bubble' }).Count
+$app = @($index | Where-Object { $_.visible -and -not $_.ime })
+$imeN = @($index | Where-Object { $_.ime }).Count
+$hiddenN = @($index | Where-Object { -not $_.visible }).Count
+$shot = @($app | Where-Object { $_.file }).Count
+$minN = @($app | Where-Object { $_.minimized }).Count
+$blankN = @($app | Where-Object { $_.blank }).Count
+$bubbleN = @($app | Where-Object { $_.tags -contains 'restore_pages_bubble' }).Count
 $doc = [ordered]@{
     schema = 'app-debloat.shots/1'; captured_at = (Get-Date).ToUniversalTime().ToString('o')
     dpi_awareness = $dpiNow; dpi_set = $dpiSet
-    match = [ordered]@{ image_path_regex = $ImagePathRegex; roots = @($Root); bubble_title_regex = $BubbleTitleRegex }
-    counts = [ordered]@{ matched = $index.Count; captured = $shot; minimized = $minN; blank = $blankN; restore_pages_bubbles = $bubbleN }
+    match = [ordered]@{ image_path_regex = $ImagePathRegex; roots = @($Root); bubble_title_regex = $BubbleTitleRegex; skip_class_regex = $SkipClassRegex }
+    # matched counts the app's visible windows only; IME and hidden windows are listed apart.
+    counts = [ordered]@{ matched = $app.Count; captured = $shot; minimized = $minN; blank = $blankN; restore_pages_bubbles = $bubbleN
+        ime_skipped = $imeN; hidden = $hiddenN; processes_alive = $alive.Count }
     tag_meaning = $tagMeaning
     windows = $index.ToArray()
 }
 $idxPath = Join-Path $outDir ($prefix + 'index.json')
 [IO.File]::WriteAllText($idxPath, ($doc | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 
-Write-Host ("windows matched: {0}, captured: {1}, minimized: {2}, blank: {3}, other skipped or failed: {4}, restore-pages bubbles: {5}, dpi: {6}" -f `
-    $index.Count, $shot, $minN, $blankN, ($index.Count - $shot - $minN), $bubbleN, $dpiNow)
+Write-Host ("windows matched: {0}, captured: {1}, minimized: {2}, blank: {3}, other skipped or failed: {4}, restore-pages bubbles: {5}, IME skipped: {6}, hidden listed: {7}, processes alive: {8}, dpi: {9}" -f `
+    $app.Count, $shot, $minN, $blankN, ($app.Count - $shot - $minN), $bubbleN, $imeN, $hiddenN, $alive.Count, $dpiNow)
 foreach ($e in $index) {
     $state = $(if ($e.file) { $e.file + $(if ($e.blank) { ' (blank)' } else { '' }) }
                elseif ($e.minimized) { 'minimized: window present, not captured' + $(if ($e.restores_maximized) { ' (restores maximized)' } elseif ($e.restored_size) { " (restored size $($e.restored_size -join 'x'))" } else { '' }) }
                elseif ($e.skipped) { 'skipped: ' + $e.skipped } else { 'error: ' + $e.error })
     $tagText = $(if (@($e.tags).Count) { ' [' + ((@($e.tags) | ForEach-Object { if ($tagNote[$_]) { "$_`: $($tagNote[$_])" } else { $_ } }) -join '; ') + ']' } else { '' })
     Write-Host ("  pid {0} {1} '{2}' -> {3}{4}" -f $e.pid, $e.class, $e.title, $state, $tagText)
+}
+if (-not $app.Count) {
+    if ($alive.Count) { Write-Host ("{0} process(es) alive with only hidden windows ({1} listed in the index, not captured): the app runs, its window is hidden (tray or background mode)." -f $alive.Count, $hiddenN) }
+    else { Write-Host 'No matching process is alive.' }
 }
 if ($minN -and -not $shot) {
     Write-Host (("No window captured: {0} matched window(s) are minimized. That shows the process is up with a window present, not what it shows. " -f $minN) +

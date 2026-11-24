@@ -91,7 +91,7 @@ Notes from one run on a Youdao Dictionary desktop build; unverified for other ve
 
 - Per-user install under `%LOCALAPPDATA%` with no services; everything it needs to update itself runs as the user, without UAC.
 - The data dir may be spelled differently from the product name (Youdao uses `Yodao`), so search both spellings, for example `-App 'Youdao|Yodao'`.
-- The updater stages a new version in a timestamped folder (`updaters\<timestamp>`) and swaps it in later; an interrupted swap can leave the app unable to start (`pipeline.md` P0 step 6).
+- The updater stages a new version in a timestamped folder (`updaters\<timestamp>`) and swaps it in later; an interrupted swap can leave the app unable to start (`pipeline.md` P0 step 7).
 - The AI helper lives in its own folder (`Application\Stable`) and is started by the main client.
 - The installer may rewrite the AppUserModelID of Start Menu and Desktop shortcuts, including other apps' shortcuts. That is a write outside its own roots (`pipeline.md` P3).
 - Ads and AI prompts are drawn in-process from server config; see the next section.

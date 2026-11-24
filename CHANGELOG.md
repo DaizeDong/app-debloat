@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here (Keep a Changelog style).
 
+## [0.1.6] - 2026-11-23
+### Changed
+- Durability round on the three live apps: deleted placeholders are re-created from the journal (incl. under the tool's own deny ACE), history lines report held counts, vendor-restored binaries with a new hash are kept as backups, token/cookie redaction in captured command lines, launch_monitor refuses an elevated -Launch and sets a private working directory, new_files_since.py for staged downloads outside the roots, P7 revert tests, ledger.jsonl as the single store from P0.
+
 ## [0.1.5] - 2026-11-23
 ### Changed
 - Round-3 live feedback: non-elevated task searches say SYSTEM tasks are invisible and show the last elevated enumeration (elevated_readonly -Key); per-target knownFailure (registry hive spellings normalized, regdel covered); dry run counts changes known to fail; compact history.log line; sc.exe denials no longer appear as TerminatingError; shot_windows lists minimized windows and never restores them; weaker P6 pass; JSON files written with ConvertTo-Json -Compress or json.dumps, never heredocs.

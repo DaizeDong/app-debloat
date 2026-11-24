@@ -18,11 +18,19 @@ Desktop apps that ship a whole Chromium browser under their own brand and hang o
 |---|---|---|
 | Updater services woken by the main exe | SYSTEM services set to Manual, started by the main exe or by COM | Manual is not off (see `levers.md`, Service Disable). Confirm the wake in a launch capture or the updater's log |
 | Wake tasks | Scheduled tasks that start the updater on a timer or at logon, some as SYSTEM | Non-elevated `Get-ScheduledTask` hides SYSTEM tasks; use `scripts/elevated_readonly.ps1`. They live in vendor subfolders such as `\<Vendor>UpdaterSystem\<Vendor>Updater\`, not in the root |
-| Older updater service versions | Earlier versions of the updater service left installed next to the current one | One may be protected by a security suite, so its config change is denied per item (`safety.md`, Antivirus) |
+| Older updater service versions | Earlier versions of the updater service left installed next to the current one | One may be protected by a security suite, so its config change is denied per item (`safety.md`, Antivirus). Woken, an inactive version may uninstall itself (Updater Versions below) |
 | Exe swap on launch | A staged `new_<app>.exe` is renamed over `<app>.exe` when the app starts | The fingerprint changes during P1 without any installer running |
 | Old version folder cleanup | The previous `<version>\` folder is deleted on the next start | Any action targeting a fixed version path drifts; resolve by name |
 | Installer or repair re-run | Full installer from the vendor CDN | Rewrites services, tasks and shortcuts |
 | Shell extensions re-registered on update | Context menu CLSIDs under HKLM and HKCU | |
+
+## Updater Versions
+
+Chromium-style updaters keep one folder per version (`<updater root>\<version>\updater.exe`) and record which one is active in `prefs.json` in the updater's data folder (`active_version`). An inactive version that is woken uninstalls itself when `active_version` is newer than its own. Observed in one run, as the user and without elevation: starting `<old version>\updater.exe --wake --system` made it start its Manual SYSTEM service through COM, then its log said `This version 1.2.0.10, active version 1.3.0.4` and `Uninstalling version 1.2.0.10`, and it deleted its own wake task, both of its services and its version folder (versions here are synthetic). That cannot be undone without reinstalling the vendor's updater.
+
+- Before fighting an old version's services (a denied service change, a `knownFailure`), read `active_version` from `prefs.json` and record it with each version folder's version in the ledger.
+- The vendor's own wake is then a cleanup option for the old version: it removes the services and task the engine could not disable. It is irreversible and changes vendor state outside the plan, so it needs the owner's explicit approval, runs once by hand (not from the manifest), and is recorded as an `RI` ledger entry (writer, trigger, what it removed, before and after listings), with the `knownFailure` actions it makes moot dropped at the next plan update.
+- The same applies to the P6 repair or update trigger (`pipeline-apply.md`, P6 step 4): waking the updater's task exe can start this cleanup, so ask first.
 
 ## Gates
 
@@ -58,7 +66,7 @@ Security-update cost: blocking the updater freezes the Chromium version, so the 
 ## Integrity and Ban Risk
 
 - The browser part is accountless; a bundled cloud drive or AI assistant may be account-bound. Ask per app.
-- Integrity probe: rename an unused locale `.pak` in the version folder, start, watch for a repair download, restore. The first launch may also swap the exe; follow `pipeline.md` P0 step 7.
+- Integrity probe: rename an unused locale `.pak` in the version folder, start, watch for a repair download, restore. The first launch may also swap the exe; follow `pipeline.md` P0 step 8.
 
 ## Verification Probes
 

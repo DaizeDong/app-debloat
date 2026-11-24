@@ -44,7 +44,9 @@
 
 .PARAMETER Auto
   Used by the @@APP_PREFIX@@Debloat-Watch task: saved options, blocking actions only, full log to auto.log and one
-  compact line per run to history.log (known failures as [action-id xN, ref R]; their full text stays in auto.log).
+  compact line per run to history.log (known failures as [action-id xN, ref R], whose full text stays in auto.log;
+  then the text of each failure as FAIL: <item :: error>, unique and cut to about 200 characters; then the WARN text).
+  Placeholders it placed earlier that were deleted since are re-created while their parent folder exists.
   On a version the manifest does not list it changes nothing, logs a WARN line and exits 2.
 
 .PARAMETER InstallRoot

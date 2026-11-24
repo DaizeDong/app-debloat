@@ -2,8 +2,9 @@
 <#
 .SYNOPSIS
   One elevated, read-only evidence bundle for one app: elevated inventory, scheduled task XML
-  (SYSTEM tasks included), service config and failure actions, and module lists of the app's
-  processes (32-bit WOW64 modules included). Meant to run once, early, behind one UAC prompt.
+  (SYSTEM tasks included), service config and failure actions, module lists of the app's
+  processes (32-bit WOW64 modules included), and which of its exes Prefetch has seen run. Meant
+  to run once, early, behind one UAC prompt.
 
 .DESCRIPTION
   Refuses to run without elevation. Changes nothing outside -Out, except that with -Key it creates
@@ -25,13 +26,29 @@
     services.json             whose binary is under a root or whose name matches -App
     modules.json              Toolhelp32 module list (TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32)
                               for every running process whose image is under a root
+    prefetch.json             for each exe name under the roots (placeholder folders named like an
+                              exe included), the matching %SystemRoot%\Prefetch\<NAME>-*.pf files
+                              with name, creation and last-write time (nothing is copied or
+                              parsed), plus coverage: the oldest and newest .pf dates in the
+                              folder, the .pf count, EnablePrefetcher, and the SysMain service's
+                              start mode and state (SysMain writes the .pf files). No .pf for an
+                              exe is evidence that it did not run only between those dates, and
+                              only while SysMain is running
     bundle.json               what ran, counts and every failure
+
+  Command lines and task arguments in tasks.json, tasks\*.xml, task-states.json and modules.json
+  (and in inventory-elevated.json, which inventory.ps1 writes) have credential-like values
+  replaced by <redacted>, keeping the switch and parameter names: names containing token, stoken,
+  bduss, session, password, passwd, secret, cookie or auth (access_token= included), JSON members
+  with such names, and Cookie and Authorization headers. Secrets without such a name (a bare
+  token, a license key) are not recognized, so the bundle stays private DATA.
 
   With -Key <manifest id>, also writes %ProgramData%\AppDebloat\<key>\elevated-tasks.json:
   captured_at and tasks[{path, name, state, author, actions[{type, execute, class_id}]}] for every
   scheduled task outside \Microsoft\ (the folders a task-disable action can match), not only the
   ones matched above. Action arguments are left out: every local user can read this file, and
-  SYSTEM task arguments can carry tokens or license keys (tasks.json under -Out keeps them).
+  SYSTEM task arguments can carry tokens or license keys. tasks.json under -Out keeps the
+  arguments, with credential-like values redacted as described above.
   A non-elevated dry run of the built script cannot see SYSTEM tasks; it reads this file to print
   what this elevated enumeration found, and when. The folder is created if missing and gets the
   admin-only permissions the built script gives it (SYSTEM and Administrators full, Users read);
@@ -162,6 +179,45 @@ function Test-Refs([string]$s) {
     foreach ($p in $prefixes) { if ($l.Contains($p + '\') -or $l.Contains($p + '"') -or $l.EndsWith($p)) { return $true } }
     $false
 }
+# Credential-like values in command lines become <redacted>; switch and parameter names stay.
+# The same rule is in launch_monitor.ps1 and inventory.ps1.
+$SecretName = '[\w.-]*?(?:token|stoken|bduss|session|password|passwd|secret|cookie|auth)[\w.-]*'
+$StrongName = '[\w.-]*?(?:token|stoken|bduss|password|passwd|secret|cookie)[\w.-]*'
+$SecretRx = @(
+    # -name value, --name=value, /name:value. After a token, bduss, password, secret or cookie switch the next
+    # word is the value even when it starts with - or / (base64 can); after a session or auth switch a
+    # following switch is not taken. Only the value is matched (the name sits in the lookbehind), so a value
+    # that is itself such a switch is redacted and the word after it still is too.
+    [regex]::new('(?<=(?<![^\s"''(])(?:--?|/)(?:' + $StrongName + '\s+|' + $SecretName + '(?:[=:]|\s+(?=[^\s/-]))))(?<v>"[^"]*"?|''[^'']*''?|[^\s"'']+)', 'IgnoreCase'),
+    # name=value in a query string or key=value list (?access_token=..., &session=...)
+    [regex]::new('(?<![\w./-])(?<n>' + $SecretName + ')(?<s>=)(?<v>"[^"]*"?|[^\s"''&#;,]+)', 'IgnoreCase'),
+    # "name": "value" in JSON on a command line, quotes possibly escaped
+    [regex]::new('(?<n>\\?"' + $SecretName + '\\?")(?<s>\s*:\s*)(?<v>\\?"(?:[^"\\]|\\(?!"))*\\?"|[^\s,}\]]+)', 'IgnoreCase'),
+    # Cookie: and Authorization: headers
+    [regex]::new('(?<![\w-])(?<n>(?:set-)?cookie|authorization)(?<s>\s*:\s*)(?<v>[^"''\r\n]+)', 'IgnoreCase')
+)
+function Hide-Secret([string]$s) {
+    if (-not $s) { return $s }
+    foreach ($rx in $SecretRx) {
+        $s = $rx.Replace($s, [Text.RegularExpressions.MatchEvaluator] {
+            param($m)
+            $v = $m.Groups['v'].Value; $q = ''
+            foreach ($c in '\"', '"', "'") { if ($v.StartsWith($c)) { $q = $c; break } }
+            $close = $(if ($q -and $v.Length -gt $q.Length -and $v.EndsWith($q)) { $q } else { '' })
+            $m.Groups['n'].Value + $m.Groups['s'].Value + $q + '<redacted>' + $close })
+    }
+    $s
+}
+# The <Arguments> of an exported task XML, decoded, redacted and encoded again; the rest stays as exported.
+function Hide-XmlArgs([string]$xml) {
+    if (-not $xml) { return $xml }
+    [regex]::Replace($xml, '(?s)(<Arguments>)(.*?)(</Arguments>)', [Text.RegularExpressions.MatchEvaluator] {
+        param($m)
+        $raw = [Net.WebUtility]::HtmlDecode($m.Groups[2].Value)
+        $red = Hide-Secret $raw
+        if ($red -ceq $raw) { return $m.Value }
+        $m.Groups[1].Value + [Security.SecurityElement]::Escape($red) + $m.Groups[3].Value })
+}
 function Safe-Name([string]$s) { $n = ($s -replace '[\\/:*?"<>|\s]+', '_').Trim('_'); if ($n.Length -gt 120) { $n = $n.Substring(0, 120) }; $n }
 
 # ---------------------------------------------------------------- 2. scheduled tasks (SYSTEM included)
@@ -169,7 +225,7 @@ $allTasks = New-Object System.Collections.Generic.List[object]; $allTasksOk = $f
 try {
     $taskIdx = New-Object System.Collections.Generic.List[object]
     foreach ($t in @(Get-ScheduledTask)) {
-        $acts = @(foreach ($a in @($t.Actions)) { if ($a) { [ordered]@{ type = $a.CimClass.CimClassName -replace '^MSFT_Task', ''; execute = $a.Execute; arguments = $a.Arguments; class_id = $a.ClassId } } })
+        $acts = @(foreach ($a in @($t.Actions)) { if ($a) { [ordered]@{ type = $a.CimClass.CimClassName -replace '^MSFT_Task', ''; execute = $a.Execute; arguments = (Hide-Secret $a.Arguments); class_id = $a.ClassId } } })
         if ($t.TaskPath -notlike '\Microsoft\*') {
             # Users can read the -Key file, so no arguments here (SYSTEM task arguments can hold tokens).
             $pubActs = @(foreach ($a in $acts) { [ordered]@{ type = $a.type; execute = $a.execute; class_id = $a.class_id } })
@@ -182,7 +238,7 @@ try {
         if (-not $why -and $appRx -and $appRx.IsMatch("$($t.TaskPath)$($t.TaskName) $($t.Author) $($t.Description)")) { $why = 'app' }
         if (-not $why) { continue }
         $file = (Safe-Name "$($t.TaskPath)$($t.TaskName)") + '.xml'
-        try { [IO.File]::WriteAllText((Join-Path $outDir "tasks\$file"), (Export-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath), $utf8) }
+        try { [IO.File]::WriteAllText((Join-Path $outDir "tasks\$file"), (Hide-XmlArgs (Export-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath)), $utf8) }
         catch { Add-Fail 'tasks' "$($t.TaskPath)$($t.TaskName)" $_.Exception.Message; $file = $null }
         $info = $null; try { $info = Get-ScheduledTaskInfo -TaskName $t.TaskName -TaskPath $t.TaskPath } catch { }
         $taskIdx.Add([ordered]@{
@@ -241,7 +297,7 @@ try {
             if ($def) {
                 foreach ($a in @($def.Actions)) {
                     if ($a.Type -eq 0) {   # TASK_ACTION_EXEC
-                        $acts += [ordered]@{ type = 'Exec'; execute = $a.Path; arguments = $a.Arguments; workdir = $a.WorkingDirectory }
+                        $acts += [ordered]@{ type = 'Exec'; execute = $a.Path; arguments = (Hide-Secret $a.Arguments); workdir = $a.WorkingDirectory }
                         if (-not $why -and (Test-Refs "$($a.Path) $($a.Arguments) $($a.WorkingDirectory)")) { $why = 'root' }
                     } elseif ($a.Type -eq 5) { $acts += [ordered]@{ type = 'ComHandler'; class_id = $a.ClassId; data = $a.Data } }
                     else { $acts += [ordered]@{ type = "type$($a.Type)" } }
@@ -361,7 +417,7 @@ try {
         $err = 0; $mods = [AdElev]::Modules($id, [ref]$err)
         if ($null -eq $mods) { Add-Fail 'modules' "pid $id" "Toolhelp32 error $err" }
         $modIdx.Add([ordered]@{
-            pid = [int]$id; ppid = [int]$p.ParentProcessId; name = $p.Name; image = $img; command_line = $p.CommandLine
+            pid = [int]$id; ppid = [int]$p.ParentProcessId; name = $p.Name; image = $img; command_line = (Hide-Secret $p.CommandLine)
             wow64 = $(if ($wow -eq 1) { $true } elseif ($wow -eq 0) { $false } else { $null }); error = $(if ($null -eq $mods) { $err } else { $null })
             modules = @(foreach ($m in @($mods)) { if ($m) { [ordered]@{ path = $m.Path; base = $m.Base; size = $m.Size } } })
         })
@@ -370,11 +426,81 @@ try {
     $bundle.steps['modules'] = [ordered]@{ file = 'modules.json'; processes = $modIdx.Count; wow64 = @($modIdx | Where-Object { $_.wow64 }).Count }
 } catch { Add-Fail 'modules' '(all)' $_.Exception.Message }
 
+# ---------------------------------------------------------------- 5. Prefetch: which of the app's exes ever ran
+# Exe names under the roots (a placeholder folder named like an exe counts: the exe it replaced may have run).
+function Get-ExeNames([string[]]$dirs) {
+    $names = @{}
+    foreach ($r in $dirs) {
+        $stack = New-Object System.Collections.Generic.Stack[string]; $stack.Push($r); $n = 0
+        while ($stack.Count -and $n -lt 200000) {
+            $d = $stack.Pop()
+            try { $entries = (New-Object IO.DirectoryInfo($d)).GetFileSystemInfos() } catch { Add-Fail 'prefetch' $d $_.Exception.Message; continue }
+            foreach ($e in $entries) {
+                $n++
+                if ($e.Name.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) { $names[$e.Name.ToUpperInvariant()] = $e.Name }
+                if ($e -is [IO.DirectoryInfo] -and -not ($e.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($e.FullName) }
+            }
+        }
+    }
+    $names
+}
+# Names and times of the matching .pf files only: nothing is copied or parsed. Prefetch names a file
+# <EXE NAME>-<8 hex>.pf, with a long exe name cut to its first 29 characters.
+function Get-PrefetchReport([string]$folder, $names) {
+    $doc = [ordered]@{ captured_at = $bundle.captured_at; folder = $folder; readable = $false; error = $null; enable_prefetcher = $null
+        pf_files = 0; coverage = $null; names_checked = $names.Count; with_pf = 0; exes = @() }
+    try {
+        $v = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -Name EnablePrefetcher -ErrorAction Stop
+        $doc.enable_prefetcher = [int]$v.EnablePrefetcher
+    } catch { }
+    # The SysMain service writes the .pf files: stopped or disabled, nothing new is recorded whatever EnablePrefetcher says.
+    $sm = $null; try { $sm = Get-CimInstance Win32_Service -Filter "Name='SysMain'" -Property StartMode, State -ErrorAction Stop } catch { }
+    $pf = @()
+    try { $pf = @((New-Object IO.DirectoryInfo($folder)).GetFiles('*.pf')); $doc.readable = $true } catch { $doc.error = $_.Exception.Message; return $doc }
+    $doc.pf_files = $pf.Count
+    $byWrite = @($pf | Sort-Object LastWriteTime)
+    $doc.coverage = [ordered]@{
+        oldest_created     = $(if ($pf.Count) { @($pf | Sort-Object CreationTime)[0].CreationTime.ToString('o') } else { $null })
+        oldest_written     = $(if ($pf.Count) { $byWrite[0].LastWriteTime.ToString('o') } else { $null })
+        newest_written     = $(if ($pf.Count) { $byWrite[-1].LastWriteTime.ToString('o') } else { $null })
+        sysmain_start_mode = $(if ($sm) { [string]$sm.StartMode } else { $null })
+        sysmain_state      = $(if ($sm) { [string]$sm.State } else { $null })
+        meaning            = 'no .pf for an exe shows it did not run between oldest_created and newest_written at most, and only while SysMain is Running (with it stopped or disabled no .pf is written); older runs may have been cleared or evicted' }
+    $byPrefix = @{}
+    foreach ($f in $pf) {
+        $i = $f.Name.LastIndexOf('-'); if ($i -le 0) { continue }
+        $k = $f.Name.Substring(0, $i).ToUpperInvariant()
+        if ($byPrefix.ContainsKey($k)) { $byPrefix[$k] += , $f } else { $byPrefix[$k] = @(, $f) }
+    }
+    $doc.exes = @(foreach ($k in @($names.Keys | Sort-Object)) {
+        $pn = $(if ($k.Length -gt 29) { $k.Substring(0, 29) } else { $k })
+        $hits = $(if ($byPrefix.ContainsKey($pn)) { $byPrefix[$pn] } else { @() })
+        if (@($hits).Count) { $doc.with_pf++ }
+        [ordered]@{ name = $names[$k]; prefetch_name = $pn
+            pf = @(foreach ($f in @($hits)) { [ordered]@{ file = $f.Name; created = $f.CreationTime.ToString('o'); written = $f.LastWriteTime.ToString('o') } }) }
+    })
+    $doc
+}
+try {
+    $pfDoc = Get-PrefetchReport (Join-Path $env:SystemRoot 'Prefetch') (Get-ExeNames $roots)
+    $pfDoc.folder = '%SystemRoot%\Prefetch'
+    Save-Json 'prefetch.json' $pfDoc
+    $bundle.steps['prefetch'] = [ordered]@{ file = 'prefetch.json'; exes = $pfDoc.names_checked; with_pf = $pfDoc.with_pf; pf_files = $pfDoc.pf_files
+        oldest = $(if ($pfDoc.coverage) { $pfDoc.coverage.oldest_created } else { $null }); newest = $(if ($pfDoc.coverage) { $pfDoc.coverage.newest_written } else { $null })
+        sysmain = $(if ($pfDoc.coverage -and $pfDoc.coverage.sysmain_state) { "$($pfDoc.coverage.sysmain_state), $($pfDoc.coverage.sysmain_start_mode)" } else { $null }) }
+    if (-not $pfDoc.readable) { Add-Fail 'prefetch' '%SystemRoot%\Prefetch' $pfDoc.error }
+} catch { Add-Fail 'prefetch' '(all)' $_.Exception.Message }
+
 Save-Json 'bundle.json' $bundle
 Write-Host ("elevated bundle: tasks {0} (state baseline {4}), services {1}, processes {2}, failures {3}" -f `
     $(if ($bundle.steps['tasks']) { $bundle.steps['tasks'].count } else { 'n/a' }),
     $(if ($bundle.steps['services']) { $bundle.steps['services'].count } else { 'n/a' }),
     $(if ($bundle.steps['modules']) { $bundle.steps['modules'].processes } else { 'n/a' }), $bundle.failures.Count,
     $(if ($bundle.steps['task_states']) { "$($bundle.steps['task_states'].count), $($bundle.steps['task_states'].disabled) disabled" } else { 'n/a' }))
+if ($bundle.steps['prefetch']) {
+    $st = $bundle.steps['prefetch']
+    Write-Host ("prefetch: {0} of {1} exe names have a .pf file; coverage {2} to {3}, SysMain {4}" -f $st.with_pf, $st.exes,
+        $(if ($st.oldest) { $st.oldest } else { 'n/a' }), $(if ($st.newest) { $st.newest } else { 'n/a' }), $(if ($st.sysmain) { $st.sysmain } else { 'unknown' }))
+}
 if ($bundle.steps['state_tasks']) { Write-Host ("task list for the dry run: {0} ({1} tasks outside \Microsoft\)" -f $bundle.steps['state_tasks'].file, $bundle.steps['state_tasks'].count) }
 Write-Host "out: $outDir"

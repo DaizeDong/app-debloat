@@ -12,9 +12,22 @@ snapshots and traces it points at, never in the tool repo. Examples below are sy
 
 ## File and Format
 
-One JSON object per line in `ledger.jsonl`. Append new entries; change an existing entry only to
-update `status`, `stale`, `superseded_by` or `anchors` (with a new `updated` date). Never renumber
-or reuse an ID.
+One JSON object per line in `ledger.jsonl`, in the app's private folder. It is the one ledger:
+`analysis.md` and `plan.md` are views written from it, never a second store. Append new entries;
+change an existing entry only to update `status`, `stale`, `superseded_by`, `anchors` or `notes`
+(with a new `updated` date). Never renumber or reuse an ID.
+
+When anchors are added to an existing entry, append one dated line to its `notes` saying what the
+new anchor shows, for example `2030-01-01: System 7006 at the denied sc.exe config confirms a
+registry-level veto on Start`. Earlier lines of `notes` are never rewritten; separate lines with
+`\n` inside the string.
+
+When a run finds an older ledger kept only as tables in `analysis.md` (no `ledger.jsonl`), convert
+its entries into `ledger.jsonl` before adding new ones: one entry per row or finding, with the IDs
+it already had (or new IDs in creation order when it had none), the status it carried, its anchors
+as far as the table states them (`hypothesis` with empty anchors where it states none), and a
+`notes` line `<date>: converted from analysis.md`. Then rewrite `analysis.md` as a view that cites
+those IDs.
 
 ```json
 {"id": "L-EDGE-003", "kind": "EDGE", "claim": "UpdHelper.exe starts PopNews.exe with -silent after login.",
@@ -31,7 +44,28 @@ or reuse an ID.
 
 Required fields: `id`, `kind`, `claim`, `status`, `anchors` (may be empty only for `hypothesis`),
 `app_version`, `created`. Use `from`/`to` for EDGE, `gate` for GATE (the switch location), `vector`
-for RI. `depends_on` lists the entries this one builds on.
+for RI, and `stage` plus `checkpoint` for a checkpoint answer (below). `depends_on` lists the entries
+this one builds on.
+
+## Checkpoint Answers
+
+The stage checkpoints in `pipeline.md` and `pipeline-apply.md`, and the eight questions in
+`SKILL.md`, are answered in `ledger.jsonl`, one entry per answer, never only in `analysis.md`. Each
+answer carries `stage` (`P0` to `P4`) and `checkpoint` (the question, in a few words). Its kind is
+the kind of its claim when one fits: the integrity probe result is `INT`, a half-applied update
+`RI`, where config lives `GATE`, DLL injection into other processes `EDGE`. An answer that is a
+decision or setting of the run (category and profile, risk tier, RE backend and its version, owner
+consent, a keep and its reason) is a `DEC` entry, anchored on what decided it: the probe entries in
+`depends_on`, the doctor output, the owner's message by date. "unknown" is an entry too: status
+`hypothesis`, the claim says unknown and why, and `notes` says what would settle it.
+
+```json
+{"id": "L-DEC-002", "kind": "DEC", "stage": "P0", "checkpoint": "risk tier",
+ "claim": "Risk tier normal: in-tree changes allowed.", "status": "observed", "app_version": "2.3.1",
+ "anchors": [{"type": "log", "source": "integrity probe, see L-INT-001", "time": "2026-01-15T09:10Z",
+              "line": "PopNews.dll renamed; app started, no repair, no forced logout; file restored"}],
+ "depends_on": ["L-INT-001"], "created": "2026-01-15", "notes": ""}
+```
 
 Write the file with a JSON serializer, never by typing JSON into a shell heredoc or `echo`: the
 shell turns the `\\` in Windows paths into `\`, and the line stops being JSON. Build the entry as an
@@ -68,6 +102,7 @@ follows the same rule: build the object and serialize it, never type it through 
 | `NET` | Process talks to host or endpoint E | inventory connections, Sysmon 3/22 |
 | `INT` | Integrity behavior: self-check, re-download, forced logout after a change | integrity probe |
 | `VER` | A plan action was applied and its block held (or failed) at a given check | post-apply snapshot, reboot, delayed re-read |
+| `DEC` | A checkpoint answer that is a decision or setting of the run: category and profile, risk tier, RE backend, owner consent, a keep | the entries, output or owner message that decided it |
 
 Add a kind only when none of these fit, and document it at the top of the ledger.
 
@@ -182,6 +217,8 @@ output back into the binary or the analysis database as if it were vendor text.
   | UpdHelper.exe -> PopNews.exe | ShellExecuteExW, `-silent` | `[Setting] NewsPush` in `%ProgramData%\AcmeCorp\ExampleApp\app.ini` | L-EDGE-003 (observed), L-GATE-002 (inferred) |
 
 - Reinstall vectors: one row per `L-RI` entry with how its block is verified.
+- Checkpoint answers: one section per stage (`P0` to `P4`) listing that stage's answer entries
+  (`stage` field) by ID; the `Contract` section lists the `CORE` entries.
 - Open hypotheses: every `hypothesis` entry with the probe that would settle it. This list is the
   next work item when a run resumes.
 
@@ -227,3 +264,6 @@ Rules for the plan:
 | `snapshot_diff.py` added or changed items after a trigger | `RI` (what came back) or `VER` (what held) with two `snapshot` anchors |
 | `snapshot_diff.py` `fingerprint_changes` (with `changed_files`, `removed_files`, `added_files`) | mark affected entries `stale` and rerun inventory and triage; a change caused by launching the app itself (a swap or cleanup) is an `RI` entry of its own |
 | `snapshot_diff.py` `capped` on a file category | no add/remove evidence for that root; rerun with a higher `-MaxFiles` or diff the specific files |
+| `elevated_readonly.ps1` `prefetch.json` (`exes[].pf`, `coverage`) | a `log` anchor (source Prefetch, the `.pf` file name and its times) that the exe ran, most recently around the `.pf` last-write time; an exe with no `.pf` is `negative` only for the window from `coverage.oldest_created` to `coverage.newest_written` (Prefetch may have been cleared or evicted before it, and nothing after the newest write is covered), only with prefetching on (`enable_prefetcher`), and only when `coverage.sysmain_state` is `Running` (SysMain writes the `.pf` files; stopped or disabled, as on many debloated machines, it records nothing and a missing `.pf` proves nothing) |
+| `new_files_since.py` `files[]` | `INV` or `RI` lead for a binary or package written outside the roots; at most `inferred` until a launch capture or the vendor's log ties the write to the app |
+| `launch_monitor.ps1` `proc_*` lines with `name_match: true` | a line whose `reason` is `root` or `service` is already tied to the app (its image or service binary is under a root), and one with `child` or `launched` through the parent chain; a line with `reason` `name` (always `under_root: false`, since `root` and `service` take priority) stays `hypothesis` unless the vendor's log names the process at that time (`pipeline-field-notes.md`, P6) |
