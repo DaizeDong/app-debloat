@@ -313,6 +313,21 @@
       ]
     },
     {
+      "id": "toolkit-autorun",
+      "type": "reg-delete-value",
+      "category": "promo",
+      "rationale": [
+        "L-P6"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+      "names": [
+        "ContosoToolkits"
+      ]
+    },
+    {
       "id": "ifeo",
       "type": "ifeo-block",
       "category": "updater",

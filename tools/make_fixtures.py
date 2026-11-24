@@ -109,6 +109,10 @@ CONTOSO = {
         act("store-switches", "reg-set", "ad", ["L-A3"], target="HKCU\\Software\\ContosoPinyin\\Settings", kind="DWord",
             values={"AiChatEnable": 0, "PopupEnable": 0, "PetAutorun": 0}),
         act("biz-protocol", "reg-delete-key", "promo", ["L-P5"], target=["HKLM\\SOFTWARE\\Classes\\contosobiz"]),
+        # A single Run value, not the whole Run key. Under Run the engine deletes only a value whose program lies
+        # under the install root or an allowedRoots entry, so a value of the same name from another app is refused.
+        act("toolkit-autorun", "reg-delete-value", "promo", ["L-P6"],
+            target="HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", names=["ContosoToolkits"]),
         act("ifeo", "ifeo-block", "updater", ["L-R2", "L-R4"],
             target=["ContosoComMgr.exe", "ContosoUpdate.exe", "ContosoBizLauncher.exe", "ContosoAiChat.exe"]),
         act("env-ini", "preboot-file-edit", "ad", ["L-G2"], target=["{userData}\\*\\env.ini"], section="Setting",
@@ -162,6 +166,12 @@ FABRIKAM = {
          "help": "Replace FabrikamUpdate.exe with a placeholder. Promote by: start the client with the updater renamed and confirm sign-in and transfers."},
         {"name": "BlockReporter", "default": False,
          "help": "Firewall FabrikamReport.exe. Promote by: a Sysmon 22 capture showing it contacts only telemetry hosts."},
+        {"name": "BlockExtension", "default": False,
+         "help": "Block the bundled Fabrikam Drive browser extension by Chrome and Edge policy; the browsers then show 'Managed by your organization'."},
+        {"name": "RemoveOverlays", "default": False,
+         "help": "Remove the sync-status overlay identifiers that push other apps' overlays past Explorer's limit (takes effect after Explorer restarts)."},
+        {"name": "BlockInboundP2P", "default": False,
+         "help": "Block inbound connections to the transfer host's peer-to-peer listener. Downloads keep working; peers can no longer pull from this PC."},
     ],
     "actions": [
         act("updater-task", "task-disable", "updater", ["L-R1"], target=["\\FabrikamDrive\\FabrikamDriveUpdateTask*"]),
@@ -201,6 +211,26 @@ FABRIKAM = {
             target=["HKCU\\Software\\Fabrikam\\Drive\\PromoCache"]),
         act("hosts", "hosts-block", "telemetry", ["L-T2"], reapply=False, when="BlockHosts", acknowledgeFlagging=True,
             target=["ads.fabrikam-drive.example", "telemetry.fabrikam-drive.example"]),
+        # The widget's Run value, written back at every start: deleted value by value, re-deleted by the watch task.
+        act("widget-autorun", "reg-delete-value", "promo", ["L-P3"],
+            target=["HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"], names=["FabrikamDriveWidget"]),
+        # The client rewrites its own Run value, so the Windows startup switch is the backstop: 03 = disabled.
+        act("autostart-off", "reg-set", "promo", ["L-P4"],
+            target="HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run", kind="Binary",
+            values={"FabrikamDrive": "03 00 00 00 00 00 00 00 00 00 00 00"}),
+        # OpenWithProgids entries are values shared with other apps' ProgIDs: only the vendor's own are deleted.
+        act("open-with", "reg-delete-value", "promo", ["L-P5"],
+            target=["HKCU\\Software\\Classes\\.*\\OpenWithProgids"], match="^FabrikamDrive\\."),
+        # Overlay identifiers carry generic names with leading spaces; matchDefault picks them by their CLSID.
+        # One action per registry view (add a second with "view": 32 when the 32-bit view holds them too).
+        act("overlays", "reg-delete-key", "promo", ["L-P6"], when="RemoveOverlays",
+            target=["HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers"],
+            matchDefault="^\\{FAB0000[1-3]-CCCC-4DDD-8EEE-FFFF00001111\\}$"),
+        act("browser-ext", "browser-ext-block", "promo", ["L-P7"], when="BlockExtension",
+            ids=["fdpaonmkbhcjgeilfdpaonmkbhcjgeil"], browsers=["chrome", "edge"], removeExternal=True),
+        # An inbound block rule wins over the vendor's own allow rules; outbound transfers are not affected.
+        act("p2p-inbound", "firewall-block-program", "telemetry", ["L-T3"], when="BlockInboundP2P", direction="Inbound",
+            target=["{root}\\FabrikamDriveHost.exe"]),
     ],
 }
 

@@ -100,6 +100,21 @@
       "name": "BlockReporter",
       "default": false,
       "help": "Firewall FabrikamReport.exe. Promote by: a Sysmon 22 capture showing it contacts only telemetry hosts."
+    },
+    {
+      "name": "BlockExtension",
+      "default": false,
+      "help": "Block the bundled Fabrikam Drive browser extension by Chrome and Edge policy; the browsers then show 'Managed by your organization'."
+    },
+    {
+      "name": "RemoveOverlays",
+      "default": false,
+      "help": "Remove the sync-status overlay identifiers that push other apps' overlays past Explorer's limit (takes effect after Explorer restarts)."
+    },
+    {
+      "name": "BlockInboundP2P",
+      "default": false,
+      "help": "Block inbound connections to the transfer host's peer-to-peer listener. Downloads keep working; peers can no longer pull from this PC."
     }
   ],
   "actions": [
@@ -377,6 +392,106 @@
       "target": [
         "ads.fabrikam-drive.example",
         "telemetry.fabrikam-drive.example"
+      ]
+    },
+    {
+      "id": "widget-autorun",
+      "type": "reg-delete-value",
+      "category": "promo",
+      "rationale": [
+        "L-P3"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+      ],
+      "names": [
+        "FabrikamDriveWidget"
+      ]
+    },
+    {
+      "id": "autostart-off",
+      "type": "reg-set",
+      "category": "promo",
+      "rationale": [
+        "L-P4"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+      "kind": "Binary",
+      "values": {
+        "FabrikamDrive": "03 00 00 00 00 00 00 00 00 00 00 00"
+      }
+    },
+    {
+      "id": "open-with",
+      "type": "reg-delete-value",
+      "category": "promo",
+      "rationale": [
+        "L-P5"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "HKCU\\Software\\Classes\\.*\\OpenWithProgids"
+      ],
+      "match": "^FabrikamDrive\\."
+    },
+    {
+      "id": "overlays",
+      "type": "reg-delete-key",
+      "category": "promo",
+      "rationale": [
+        "L-P6"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "when": "RemoveOverlays",
+      "target": [
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers"
+      ],
+      "matchDefault": "^\\{FAB0000[1-3]-CCCC-4DDD-8EEE-FFFF00001111\\}$"
+    },
+    {
+      "id": "browser-ext",
+      "type": "browser-ext-block",
+      "category": "promo",
+      "rationale": [
+        "L-P7"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "when": "BlockExtension",
+      "ids": [
+        "fdpaonmkbhcjgeilfdpaonmkbhcjgeil"
+      ],
+      "browsers": [
+        "chrome",
+        "edge"
+      ],
+      "removeExternal": true
+    },
+    {
+      "id": "p2p-inbound",
+      "type": "firewall-block-program",
+      "category": "telemetry",
+      "rationale": [
+        "L-T3"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "when": "BlockInboundP2P",
+      "direction": "Inbound",
+      "target": [
+        "{root}\\FabrikamDriveHost.exe"
       ]
     }
   ]

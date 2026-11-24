@@ -37,10 +37,11 @@
 
 .PARAMETER Uninstall
   Undo the journal in reverse order: restores each original only if the current state is still what this script
-  wrote (otherwise CONFLICT, left alone), removes only the tasks, IFEO values and firewall rules it recorded,
-  restores replaced vendor files from the backup taken before the change, and puts back INI and JSON values
-  (a settings file whose owner exe is running is a WARN: close the app and run it again). Any WARN, CONFLICT or failure keeps the
-  journal and the state folder and exits 1; run it again after resolving them.
+  wrote (otherwise CONFLICT, left alone), removes only the tasks, IFEO values, firewall rules and browser policy
+  values it recorded, restores replaced vendor files from the backup taken before the change, re-creates registry
+  values it deleted while they are still absent, and puts back INI and JSON values (a settings file whose owner
+  exe is running is a WARN: close the app and run it again). Any WARN, CONFLICT or failure keeps the journal and
+  the state folder and exits 1; run it again after resolving them.
 
 .PARAMETER Auto
   Used by the @@APP_PREFIX@@Debloat-Watch task: saved options, blocking actions only, full log to auto.log and one

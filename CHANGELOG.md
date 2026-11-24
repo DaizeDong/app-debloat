@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here (Keep a Changelog style).
 
+## [0.1.7] - 2026-11-24
+### Changed
+- Hijack coverage from three real sweeps: inventory sections browser (native messaging hosts, extensions, policies), office_addins, dormant_payloads, shell_namespace, overlay rank and pushed-out overlays, default_apps, shell_new, consent_store, settings (redacted), devtools, upnp, listen scope, staged installers, Uninstall-name matching; engine types reg-delete-value and browser-ext-block, reg-delete-key matchDefault, reg-set Binary; launch_monitor -Sample/-Attach; strscan.py keyword scanner; pipeline steps for cross-app integration, network exposure and P2P, in-app setting discovery; Settings Map.
+
 ## [0.1.6] - 2026-11-23
 ### Changed
 - Durability round on the three live apps: deleted placeholders are re-created from the journal (incl. under the tool's own deny ACE), history lines report held counts, vendor-restored binaries with a new hash are kept as backups, token/cookie redaction in captured command lines, launch_monitor refuses an elevated -Launch and sets a private working directory, new_files_since.py for staged downloads outside the roots, P7 revert tests, ledger.jsonl as the single store from P0.

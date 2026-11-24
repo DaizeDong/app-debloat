@@ -1,6 +1,6 @@
 # Neutralization Levers
 
-Pick the least-flagged lever that actually closes the path. Order below is least likely to be flagged by antivirus first. Every lever is journaled with its original state on first touch, and every lever has an undo.
+Pick the least-flagged lever that actually closes the path. Levers 1 to 9 are ordered least likely to be flagged by antivirus first; 10 and 11 (registry entries, browser policy) are low-risk levers that the Hijack Recipes below lean on. Every lever is journaled with its original state on first touch, and every lever has an undo.
 
 Columns used in each entry: Stops, Survives upgrade, AV risk, Reversible, Pitfalls.
 
@@ -20,6 +20,9 @@ Turn the component off where the app itself decides to load it (component table,
   - Some apps strip the read-only attribute before writing, so read-only alone protects nothing.
   - A "force enable" field may override the plain enable field; clear both.
   - Plain INI and JSON settings files (`Preferences`, `Local State`, vendor ini) use the engine's `ini-set` and `json-set` action types with `onlyWhenNotRunning`, not a hand-written hook; list the file in `core.preserve`. Chromium Secure Preferences carry MACs: a value covered by a MAC is reset or flagged when edited, so prefer `Local State` or an unprotected key.
+  - Autostart through a Run value: switch it off the way Task Manager does, with `reg-set` kind `Binary` in the StartupApproved key of the Run value's hive (`manifest.md`, Registry Values and Browser Policy): HKCU `...\Explorer\StartupApproved\Run` for an HKCU Run value, HKLM `...\Explorer\StartupApproved\Run` for a 64-bit HKLM Run value, HKLM `...\Explorer\StartupApproved\Run32` for a `WOW6432Node` Run value. A flag written to the wrong key reads `03` and changes nothing. A vendor that rewrites only its Run value at every start does not undo it; check after a sign-in that the app does not autostart.
+  - Environment-variable switches (`<VENDOR>_DISABLE_*` names found by `strscan.py --set env`): `reg-set` on `HKCU\Environment`, read by processes started after the next logon. Probe each one first, and never set one that turns off a signature or integrity check.
+  - Settings that only the owner can flip (encrypted, server-side) have no lever: they go into the Settings Map (`ledger.md`) as owner actions.
 
 ## 2. Same-Named Placeholder
 
@@ -80,14 +83,15 @@ Disable (do not delete) vendor tasks that run updaters, telemetry or promotions.
 
 ## 6. Firewall Rule per Program
 
-Outbound block rule for a specific executable path.
+Block rule for a specific executable path: outbound by default, `direction: Inbound` for a listener.
 
-- Stops: network traffic from that process.
+- Stops: network traffic from that process (outbound), or connections from other machines to its listeners (inbound).
 - Survives upgrade: no when the path includes a version directory. Regenerate rules each run for the current path.
 - AV risk: low.
 - Reversible: remove rules by the script's own display-name prefix.
 - Pitfalls:
   - No wildcard paths. One rule per resolved executable.
+  - A block rule beats the vendor's allow rules for the same traffic, so the vendor's rules can stay. Loopback is never filtered: a block does not touch a local hand-off listener on 127.0.0.1, and does not protect one either.
   - Fallback when a service change is denied (security-suite veto, driver protection): an outbound rule for the service exe and for each exe it launches stops its downloads while the service still runs. Pair it with task disable for its wake tasks, and say in `plan.md` that the service itself still starts.
   - Traffic from a DLL belongs to the host process. You cannot block an in-process SDK or an IME DLL loaded into a browser without blocking the browser.
   - Blocking a helper that also downloads wanted content (dictionaries, skins) breaks that content. Make it opt-in.
@@ -105,6 +109,7 @@ Add the extension CLSID under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sh
   - Some referencing keys are owned by TrustedInstaller and cannot be removed without taking ownership; do not take ownership of system keys. A dangling reference to a deleted and blocked CLSID is harmless.
   - Restarting Explorer to unload the extension: restart it in a `finally` block.
   - Vendors that offer their own toggle may disable a handler by appending `-` to the CLSID in the handler key. Match handlers with that suffix too, and check which view wins in the merged HKCR (an HKCU value overrides HKLM for that user).
+  - Icon overlays: Blocked alone is not proven to give the slot back. Delete the identifier keys too (Overlay Removal below).
 
 ## 8. IFEO by Image Name
 
@@ -129,6 +134,54 @@ Add the extension CLSID under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sh
 - Reversible: remove lines between the script's markers.
 - Pitfalls: discouraged for shared vendor domains (one company's CDN or remote config shared by several of its apps). Prefer a router, DNS filter or proxy the owner already runs. Never touch Microsoft domains.
 
+## 10. Registry Entry Removal
+
+`reg-delete-key` for a key the vendor owns (with `match` on subkey names, or `matchDefault` on each subkey's default value), `reg-delete-value` for one vendor value inside a key other apps share (a `Run` value, a ProgID under `OpenWithProgids`, a `Capabilities\FileAssociations` entry). Fields and examples: `manifest.md`, Registry Values and Browser Policy.
+
+- Stops: the registration itself: a menu entry, an overlay, a native host, an association claim, an autostart.
+- Survives upgrade: no. Installers and many apps write their keys back at every start. Set `reapply`.
+- AV risk: low.
+- Reversible: the key is exported (`reg import` on undo); a value is re-created with its first original kind and data while it is absent.
+- Pitfalls:
+  - Deleting a whole shared key (`OpenWithProgids`, `Run`) takes other apps' entries with it. Delete the value.
+  - Generic names (overlay identifiers like `   .SyncExt0`, host names) are fragile matches; `matchDefault` matches what the entry points at (a CLSID, a manifest path).
+  - Under a Run key the engine deletes only a value that starts a program under the install root or an `allowedRoots` entry.
+  - 32-bit registrations live under WOW6432Node: write one action with `view: 32` next to the 64-bit one.
+  - A key the app rewrites at every launch is back between two watch runs. Neutralize what it points at instead (Native Messaging Host below) and keep the delete as the visible part.
+
+## 11. Browser Extension Policy Block
+
+`browser-ext-block`: the extension id goes into Chrome's and Edge's `ExtensionInstallBlocklist` list in force: HKLM, or HKCU of the account running `-Apply` when only HKCU has entries, under the lowest free value number (`manifest.md`, Registry Values and Browser Policy).
+
+- Stops: installing or enabling that extension in every profile of those browsers, whichever way the vendor installs it (Web Store, `Extensions\<id>` registry keys, a profile entry written from outside). `removeExternal` also deletes the vendor's `Extensions\<id>` keys.
+- Survives upgrade: yes; the vendor does not own the policy key. Set `reapply` all the same.
+- AV risk: low.
+- Reversible: only the value the tool wrote is removed, while it still holds the id; keys it created go while empty.
+- Pitfalls:
+  - While any policy value exists, the browsers show "Managed by your organization". Some owners read that as malware. Ship it as an option with that sentence in the help, a default only when the owner agrees.
+  - Machine-wide only when the list in force is HKLM: then every Windows user of that browser gets the block. Written to HKCU, it covers only the account that ran `-Apply`; the plan says which list it uses.
+  - Other Chromium browsers (Brave, Vivaldi, a vendor's own Chromium fork) read their own policy paths and are not covered.
+
+## Hijack Recipes
+
+How the levers above answer the hijacks the cross-app sweep finds (`pipeline.md` P1 steps 5 and 6). Evidence rules apply as everywhere: a recipe is a default only on `observed` or `anchored` entries.
+
+**Inbound Block for P2P.** A BitTorrent, PCDN or upload-sharing engine listening on all interfaces, often opened up by vendor inbound allow rules on every profile. Lever: `firewall-block-program` with `"direction": "Inbound"` on each exe that listens and each exe a vendor inbound rule names (read the rule's program). The block wins over the vendor's allow rules, outbound transfers keep working, and loopback listeners are not touched. Peers can no longer connect in, so seeding to them stops. Never block outbound on the transfer host: core transfers die. Mappings the engine already requested by UPnP stay on the router until they expire or the router restarts; remove them there. Promote to a default only after the owner's transfer test passes with it applied (`pipeline.md` P1 step 6). The in-app P2P upload switch, where it is plain, is the narrower first choice.
+
+**Overlay Removal.** Explorer uses only the first 15 overlay identifiers in name order, and Windows takes some of them, so a vendor that names its identifiers with leading spaces pushes other apps' sync icons out. Lever: `reg-delete-key` on the app's `ShellIconOverlayIdentifiers` subkeys in both views (one action per view, `match` on the names or `matchDefault` on the CLSIDs), plus `shellext-block` on the CLSIDs so a re-registration does not load. It takes effect after Explorer restarts, which the engine does not do: the owner signs out or restarts Explorer. Check the inventory `shell_ext` rank afterwards. Keep the overlays when the owner uses the vendor's sync folder.
+
+**Native Messaging Host.** A key `Software\<browser vendor>\<browser>\NativeMessagingHosts\<name>` (HKCU, HKLM, and WOW6432Node with `view: 32`) whose default value names a manifest JSON, which names the host exe. Lever: `reg-delete-key` with `reapply`, `matchDefault` on the manifest path. An app that rewrites the key at every launch makes that a race the watch task loses, so placeholder the target instead: `file-placeholder-dir` on the manifest JSON (the rewritten key then points at a folder, and the browser cannot start the host) or on the host exe. Probe once that the app starts cleanly with the placeholder, then promote.
+
+**Browser Extension.** A vendor extension pushed through `Extensions\<id>` keys, a policy, or a profile entry written from outside: lever 11, with the "Managed by your organization" banner stated in the option's help. Without the policy, `reg-delete-key` on the `Extensions\<id>` keys removes the install path but not an extension already in a profile.
+
+**Office Add-In.** Add-ins register under `Software\Microsoft\Office\<app>\Addins\<ProgID>` with `LoadBehavior` (3 loads at start). Levers, narrowest first: a placeholder on the add-in DLL after the import check (nothing kept imports it), which stops both registration and loading; `reg-delete-key` on the `Addins` key the vendor wrote, with `reapply` (reactive: it acts only after the vendor registered); and, as an inferred addition, the per-user Office policy `HKCU\Software\Policies\Microsoft\Office\16.0\<App>\Resiliency\AddinList` with a string value `<ProgID>` = `0` (always disabled), which holds before any registration. The policy is written in the HKCU of the elevated account, so it reaches the owner only when the owner elevates with the same account. Never pre-create `Addins\<ProgID>` with `LoadBehavior` 0: Office then lists an add-in without a server, and the vendor's registration writes 3 over it.
+
+**Default-App Takeover.** An installer or the app sets itself as the default for file types, protocols or the browser. `UserChoice` is hash-protected: no lever writes it, and the engine never tries. Release instead: turn the vendor's re-association switch off (`ini-set`, `json-set`; for example a "register URI scheme" or "set as default player" setting), remove the vendor's extra claims where they are separate values (`reg-delete-value` on its `OpenWithProgids` entries and its `RegisteredApplications` value; `reg-delete-key` on its ProgIDs only when no kept feature opens files through them), then the owner picks the default again in Settings. A key write time within seconds of the install marks the installer's choice, not the owner's. When the app takes the default back on a timer and no switch stops it, record a residual; the toggle probe is run once, not watched.
+
+**Clipboard Watchers.** Reading the clipboard is an in-process API call; no external lever stops it short of stopping the app. Only the app's own switch: `ini-set` or `json-set` when it is plain, an owner action in the Settings Map when it is encrypted or server-side.
+
+**In-App Update Downloaders.** The main process downloads a full installer into the profile (for example `{userData}\updates`) and offers it later, outside the blocked updater. Lever: `acl-deny-write` with `emptyFirst` on that folder (no backup; the package is hundreds of MB), with `reapply`; the folder is outside the install root, so list it in the manifest's `allowedRoots`. A deny on the folder does not stop anyone with delete rights on its parent from removing the empty folder and creating a new one; if a later run shows a fresh download, use `dir-placeholder-file`. Tell the owner not to accept the "update ready" prompt: the new version is outside `supported.versions`, and every `-Auto` run stops re-applying until P1 to P3 are re-run.
+
 ## Last Resort, Not in Public Outputs
 
 Binary patching (`ret` a popup routine), injected bypass DLLs, signature-check bypass values. These pin to one build, break Authenticode (component loaders often verify signatures), carry ban and legal risk, and are excluded from public repos (see `safety.md`). If the gate is in-binary only and no lever above works, record it as a residual in the ledger.
@@ -146,3 +199,12 @@ Binary patching (`ret` a popup routine), injected bypass DLLs, signature-check b
 | Network-only helper | Firewall per program | none |
 | Service change denied by a security suite | `knownFailure` on the service action | Task disable plus firewall per program |
 | Shared-memory settings | Preboot SYSTEM edit | none |
+| P2P or upload engine listening on all interfaces | Firewall per program, `direction: Inbound` | The app's P2P switch, if plain |
+| Overlays pushing other apps' icons out | Delete the identifier keys in both views, restart Explorer | Shell extension block on the CLSIDs |
+| Native messaging host rewritten at every launch | Placeholder on the host manifest JSON or exe | Key delete with `reapply` |
+| Browser extension pushed by the app | `browser-ext-block` (option: policy banner) | `removeExternal` |
+| Office or WPS add-in | Placeholder on the add-in DLL after the import check | `AddinList` policy `0` (inferred) |
+| One vendor value in a shared key | `reg-delete-value` | StartupApproved `Binary` flag for a Run value (`Run32` for a `WOW6432Node` Run value) |
+| Default app taken over | Vendor switch off; the owner picks again | `reg-delete-value` on the vendor's claims |
+| Clipboard watcher | The app's own switch (Settings Map) | none |
+| In-app downloader staging an installer | `acl-deny-write` with `emptyFirst`, folder in `allowedRoots` | `dir-placeholder-file` |

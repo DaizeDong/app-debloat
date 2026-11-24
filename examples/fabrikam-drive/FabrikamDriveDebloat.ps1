@@ -37,10 +37,11 @@
 
 .PARAMETER Uninstall
   Undo the journal in reverse order: restores each original only if the current state is still what this script
-  wrote (otherwise CONFLICT, left alone), removes only the tasks, IFEO values and firewall rules it recorded,
-  restores replaced vendor files from the backup taken before the change, and puts back INI and JSON values
-  (a settings file whose owner exe is running is a WARN: close the app and run it again). Any WARN, CONFLICT or failure keeps the
-  journal and the state folder and exits 1; run it again after resolving them.
+  wrote (otherwise CONFLICT, left alone), removes only the tasks, IFEO values, firewall rules and browser policy
+  values it recorded, restores replaced vendor files from the backup taken before the change, re-creates registry
+  values it deleted while they are still absent, and puts back INI and JSON values (a settings file whose owner
+  exe is running is a WARN: close the app and run it again). Any WARN, CONFLICT or failure keeps the journal and
+  the state folder and exits 1; run it again after resolving them.
 
 .PARAMETER Auto
   Used by the FabrikamDriveDebloat-Watch task: saved options, blocking actions only, full log to auto.log and one
@@ -70,6 +71,12 @@
   Replace FabrikamUpdate.exe with a placeholder. Promote by: start the client with the updater renamed and confirm sign-in and transfers. Enables: updater-exe (hypothesis: client tolerance of a missing updater is untested).
 .PARAMETER BlockReporter
   Firewall FabrikamReport.exe. Promote by: a Sysmon 22 capture showing it contacts only telemetry hosts. Enables: report-net (inferred: name and strings suggest crash and usage reports only).
+.PARAMETER BlockExtension
+  Block the bundled Fabrikam Drive browser extension by Chrome and Edge policy; the browsers then show 'Managed by your organization'. Enables: browser-ext (observed).
+.PARAMETER RemoveOverlays
+  Remove the sync-status overlay identifiers that push other apps' overlays past Explorer's limit (takes effect after Explorer restarts). Enables: overlays (observed).
+.PARAMETER BlockInboundP2P
+  Block inbound connections to the transfer host's peer-to-peer listener. Downloads keep working; peers can no longer pull from this PC. Enables: p2p-inbound (observed).
 
 .EXAMPLE
   .\FabrikamDriveDebloat.ps1              # dry run
@@ -83,6 +90,9 @@ param(
     [switch]$BlockHosts,
     [switch]$RemoveUpdaterExe,
     [switch]$BlockReporter,
+    [switch]$BlockExtension,
+    [switch]$RemoveOverlays,
+    [switch]$BlockInboundP2P,
     [switch]$Apply,
     [switch]$Install,
     [switch]$Uninstall,
@@ -198,6 +208,21 @@ $ManifestJson = @'
       "name": "BlockReporter",
       "default": false,
       "help": "Firewall FabrikamReport.exe. Promote by: a Sysmon 22 capture showing it contacts only telemetry hosts."
+    },
+    {
+      "name": "BlockExtension",
+      "default": false,
+      "help": "Block the bundled Fabrikam Drive browser extension by Chrome and Edge policy; the browsers then show 'Managed by your organization'."
+    },
+    {
+      "name": "RemoveOverlays",
+      "default": false,
+      "help": "Remove the sync-status overlay identifiers that push other apps' overlays past Explorer's limit (takes effect after Explorer restarts)."
+    },
+    {
+      "name": "BlockInboundP2P",
+      "default": false,
+      "help": "Block inbound connections to the transfer host's peer-to-peer listener. Downloads keep working; peers can no longer pull from this PC."
     }
   ],
   "actions": [
@@ -476,6 +501,106 @@ $ManifestJson = @'
         "ads.fabrikam-drive.example",
         "telemetry.fabrikam-drive.example"
       ]
+    },
+    {
+      "id": "widget-autorun",
+      "type": "reg-delete-value",
+      "category": "promo",
+      "rationale": [
+        "L-P3"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+      ],
+      "names": [
+        "FabrikamDriveWidget"
+      ]
+    },
+    {
+      "id": "autostart-off",
+      "type": "reg-set",
+      "category": "promo",
+      "rationale": [
+        "L-P4"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+      "kind": "Binary",
+      "values": {
+        "FabrikamDrive": "03 00 00 00 00 00 00 00 00 00 00 00"
+      }
+    },
+    {
+      "id": "open-with",
+      "type": "reg-delete-value",
+      "category": "promo",
+      "rationale": [
+        "L-P5"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "target": [
+        "HKCU\\Software\\Classes\\.*\\OpenWithProgids"
+      ],
+      "match": "^FabrikamDrive\\."
+    },
+    {
+      "id": "overlays",
+      "type": "reg-delete-key",
+      "category": "promo",
+      "rationale": [
+        "L-P6"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "when": "RemoveOverlays",
+      "target": [
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers"
+      ],
+      "matchDefault": "^\\{FAB0000[1-3]-CCCC-4DDD-8EEE-FFFF00001111\\}$"
+    },
+    {
+      "id": "browser-ext",
+      "type": "browser-ext-block",
+      "category": "promo",
+      "rationale": [
+        "L-P7"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "when": "BlockExtension",
+      "ids": [
+        "fdpaonmkbhcjgeilfdpaonmkbhcjgeil"
+      ],
+      "browsers": [
+        "chrome",
+        "edge"
+      ],
+      "removeExternal": true
+    },
+    {
+      "id": "p2p-inbound",
+      "type": "firewall-block-program",
+      "category": "telemetry",
+      "rationale": [
+        "L-T3"
+      ],
+      "evidence": "observed",
+      "reversible": true,
+      "reapply": true,
+      "when": "BlockInboundP2P",
+      "direction": "Inbound",
+      "target": [
+        "{root}\\FabrikamDriveHost.exe"
+      ]
     }
   ]
 }
@@ -485,14 +610,14 @@ $ManifestJson = @'
 $Hooks = @{}
 # (no app-specific hooks)
 
-# ---- inlined DebloatEngine.ps1 1.5.0 ----
+# ---- inlined DebloatEngine.ps1 1.6.0 ----
 # DebloatEngine.ps1: manifest-driven neutralization engine for app-debloat.
 #
 # Dot-source it to get New-AppScript (the build step). A per-app script is the template with this
 # file inlined, so users download one file. Nothing here runs on load; Invoke-AppDebloat is the entry.
 # Reference: reference/manifest.md (schema, action types, journal, modes, exit codes).
 
-$script:AdEngineVersion = '1.5.0'
+$script:AdEngineVersion = '1.6.0'
 $script:AdEngineSource = $PSCommandPath
 $script:Ad = $null
 
@@ -1222,6 +1347,21 @@ function Split-AdRegPath([string]$p) {
     if ($p -match '^(HKCU|HKEY_CURRENT_USER|HKCU:)\\(.+)$') { return @('HKCU', $Matches[2].TrimEnd('\')) }
     throw "registry path must start with HKLM\ or HKCU\: $p"
 }
+# Binary (and None) data travels as a lowercase hex string: in the manifest, the journal and every comparison.
+# ConvertTo-AdHex accepts '03 00 00 00', '03,00', '03-00' or 'hex:0300' and throws on anything that is not whole bytes.
+function ConvertTo-AdHex($v) {
+    # A journal from engine 1.5 or older holds the bytes as numbers; AdGet hands a one-byte array back as a bare number.
+    if (($v -is [array] -and $v -isnot [byte[]]) -or $v -is [int] -or $v -is [long]) { $v = [byte[]]@($v) }
+    if ($v -is [byte[]]) { return ([BitConverter]::ToString($v) -replace '-', '').ToLowerInvariant() }
+    $s = ("$v" -replace '^(?i)hex:', '' -replace '[\s,\-]', '').ToLowerInvariant()
+    if ($s -notmatch '^([0-9a-f]{2})*$') { throw "not a hex byte string: '$v'" }
+    $s
+}
+function ConvertFrom-AdHex($v) {
+    $s = ConvertTo-AdHex $v; $b = New-Object byte[] ($s.Length / 2)
+    for ($i = 0; $i -lt $b.Length; $i++) { $b[$i] = [Convert]::ToByte($s.Substring(2 * $i, 2), 16) }
+    , $b
+}
 function Get-AdRegValue([string]$hive, $view, [string]$sub, [string]$name) {
     $b = Open-AdHive $hive $view; $k = $b.OpenSubKey($sub)
     $r = @{ keyExisted = [bool]$k; exists = $false; value = $null; kind = $null }
@@ -1230,6 +1370,7 @@ function Get-AdRegValue([string]$hive, $view, [string]$sub, [string]$name) {
             $r.exists = $true
             $r.kind = "$($k.GetValueKind($name))"
             $r.value = $k.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($r.value -is [byte[]]) { $r.value = ConvertTo-AdHex $r.value }
         }
         $k.Close()
     }
@@ -1239,9 +1380,20 @@ function Set-AdRegValue([string]$hive, $view, [string]$sub, [string]$name, $valu
     $b = Open-AdHive $hive $view; $k = $b.CreateSubKey($sub)
     try {
         $rk = [Microsoft.Win32.RegistryValueKind]$kind
-        $v = switch ($kind) { 'DWord' { [int]$value } 'QWord' { [long]$value } 'MultiString' { [string[]]@($value) } default { [string]$value } }
+        if ($kind -eq 'Binary' -or $kind -eq 'None') { $v = ConvertFrom-AdHex $value }
+        else { $v = switch ($kind) { 'DWord' { [int]$value } 'QWord' { [long]$value } 'MultiString' { [string[]]@($value) } default { [string]$value } } }
         $k.SetValue($name, $v, $rk)
     } finally { $k.Close(); $b.Close() }
+}
+# Registry data as a summary for plan, journal and undo messages: its kind and size, never the text or bytes (a Run
+# value's command line can carry a token); only a DWord or QWord number is printed. The data itself stays in 'original'.
+function Format-AdRegData($kind, $value) {
+    switch ("$kind") {
+        { @('DWord', 'QWord') -contains $_ } { return "$kind $value" }
+        'MultiString' { return "MultiString, $(@($value | Where-Object { $null -ne $_ }).Count) string(s)" }
+        { @('Binary', 'None') -contains $_ } { return "$kind, $(if ($value -is [string]) { [int]($value.Length / 2) } else { @($value | Where-Object { $null -ne $_ }).Count }) byte(s)" }
+    }
+    "$kind, $("$value".Length) chars"
 }
 function Test-AdRegKey([string]$hive, $view, [string]$sub) {
     $b = Open-AdHive $hive $view; $k = $b.OpenSubKey($sub); $ok = [bool]$k; if ($k) { $k.Close() }; $b.Close(); $ok
@@ -1260,6 +1412,76 @@ function Get-AdRegKeyRefusal([string]$sub) {
     if ($script:AdRegShallow -contains $s) { return "registry key is a shared root: $sub" }
     if ($s -like 'system\currentcontrolset\services\*') { return 'use service-disable for services, never delete them' }
     $null
+}
+# Every existing key that $sub names: a segment may hold * and ? (matched against the subkey names one level down).
+function Resolve-AdRegKeys([string]$hive, $view, [string]$sub) {
+    $cur = @('')
+    foreach ($seg in $sub.Trim('\').Split('\')) {
+        $next = @()
+        foreach ($c in $cur) {
+            if ($seg -match '[\*\?]') {
+                $p = $seg.Replace('[', '`[').Replace(']', '`]')
+                foreach ($n in (Get-AdRegSubKeys $hive $view $c)) { if ($n -like $p) { $next += $(if ($c) { "$c\$n" } else { $n }) } }
+            } else { $next += $(if ($c) { "$c\$seg" } else { $seg }) }
+        }
+        $cur = $next; if (-not $cur.Count) { return }
+    }
+    foreach ($c in $cur) { if (Test-AdRegKey $hive $view $c) { $c } }
+}
+# Values that are shared by every app (or by Windows itself) are never deleted, whatever the manifest says. The
+# patterns match the end of the key path, so the same refusals hold in any registry view.
+$script:AdRegValueProtected = @(
+    @('(^|\\)system\\(currentcontrolset|controlset\d{3})(\\|$)', 'values under SYSTEM\CurrentControlSet are never deleted (services: use service-disable)'),
+    @('\\microsoft\\windows nt\\currentversion\\(winlogon|windows)$', 'Winlogon and Windows NT\CurrentVersion\Windows values (Shell, Userinit, AppInit_DLLs) are shared by every app'),
+    @('\\explorer\\(user )?shell folders$', 'shell folder values locate the user''s known folders'))
+$script:AdEnvProtected = @('path', 'pathext', 'temp', 'tmp', 'psmodulepath', 'comspec', 'windir')
+# A Run, RunOnce or RunServices key (also under Policies\Explorer). Its values start programs at logon, so only a value
+# that starts a program under the install root or an allowedRoots entry may be deleted.
+$script:AdRunKeyPattern = '(?i)(^|\\)microsoft\\windows\\currentversion\\(policies\\explorer\\)?run(once|services|servicesonce)?$'
+# Why the value $name of key $sub (current data $cur from Get-AdRegValue) may not be deleted, or $null.
+function Get-AdRegValueRefusal([string]$sub, [string]$name, $cur) {
+    $s = $sub.Trim('\').ToLowerInvariant()
+    if (($s -split '\\').Count -lt 2 -and $s -ne 'environment') { return "registry key too shallow: $sub" }
+    if (-not $name) { return 'the default value is never deleted (use reg-set or reg-delete-key)' }
+    foreach ($p in $script:AdRegValueProtected) { if ($s -match $p[0]) { return $p[1] } }
+    if ($s -match '(^|\\)environment$' -and $script:AdEnvProtected -contains $name.ToLowerInvariant()) { return "environment variable $name is shared by every program" }
+    if ($cur.kind -eq 'Unknown') { return "its data kind cannot be journaled, so it could not be restored" }
+    if ($s -notmatch $script:AdRunKeyPattern) { return $null }
+    $exe = if (@('String', 'ExpandString') -contains $cur.kind) { Get-AdCommandExe ([string]$cur.value) } else { $null }
+    if (-not $exe -or -not [IO.Path]::IsPathRooted($exe)) { return "Run value $name ($(Format-AdRegData $cur.kind $cur.value)$(if ($exe -match '(?i)\.exe$') { ", program $exe" })) names no full program path; only a value that starts a program under the install root or an allowedRoots entry is deleted" }
+    try { $full = Get-AdNormal $exe } catch { return "Run value $name names an invalid path '$exe'" }
+    foreach ($b in $script:Ad.Bases) { if (Test-AdUnder $full $b -OrEqual) { return $null } }
+    $real = $null; try { $real = Get-AdRealPath $full } catch { }
+    if ($real) { foreach ($rb in @($script:Ad.RealBases.Values)) { if (Test-AdUnder $real $rb -OrEqual) { return $null } } }
+    "Run value $name starts $full, which is outside the install root and allowedRoots"
+}
+# Where browser-ext-block writes and reads. Policy and UserPolicy: the machine (HKLM) and user (HKCU) policy keys the
+# browser reads. External: the keys through which an installer registers an extension for side-loading (removeExternal).
+function New-AdBrowserSpec([string]$label, [string]$policy, [string]$vendor) {
+    @{ Label = $label; Policy = @('HKLM', 64, "SOFTWARE\Policies\$policy"); UserPolicy = @('HKCU', 64, "Software\Policies\$policy")
+       External = @(@('HKLM', 64, "SOFTWARE\$vendor\Extensions"), @('HKLM', 32, "SOFTWARE\$vendor\Extensions"), @('HKCU', 64, "Software\$vendor\Extensions")) }
+}
+$script:AdBrowsers = [ordered]@{ chrome = (New-AdBrowserSpec 'Chrome' 'Google\Chrome' 'Google\Chrome'); edge = (New-AdBrowserSpec 'Edge' 'Microsoft\Edge' 'Microsoft\Edge') }
+# The shallowest key on the way to $sub that does not exist (what CreateSubKey would create), or $null.
+function Get-AdRegMissingFrom([string]$hive, $view, [string]$sub) {
+    $path = ''
+    foreach ($seg in $sub.Trim('\').Split('\')) { $path = if ($path) { "$path\$seg" } else { $seg }; if (-not (Test-AdRegKey $hive $view $path)) { return $path } }
+    $null
+}
+# Deletes $leaf and then each parent up to and including $top, while the key is empty; stops at the first key that
+# holds anything. Used only for keys the journal shows the tool created.
+function Remove-AdEmptyRegKeys([string]$hive, $view, [string]$leaf, [string]$top) {
+    if (-not $top -or -not ($leaf -ieq $top -or $leaf.StartsWith("$top\", 'OrdinalIgnoreCase'))) { return }
+    $cur = $leaf
+    while ($true) {
+        $b = Open-AdHive $hive $view
+        try {
+            $k = $b.OpenSubKey($cur)
+            if ($k) { $empty = ($k.ValueCount -eq 0 -and $k.SubKeyCount -eq 0); $k.Close(); if (-not $empty) { return }; $b.DeleteSubKey($cur, $false) }
+        } finally { $b.Close() }
+        if ($cur -ieq $top) { return }
+        $cur = $cur.Substring(0, $cur.LastIndexOf('\'))
+    }
 }
 
 # ------------------------------------------------------------------ INI editor (self-contained: copied into pre-logon tasks)
@@ -1375,8 +1597,16 @@ function New-AdJsonMember([string[]]$segs, [int]$depth, [string]$canon) {
 # ------------------------------------------------------------------ manifest
 $script:AdSchema = 2
 $script:AdTypes = @('service-disable', 'task-disable', 'file-placeholder-dir', 'dir-placeholder-file', 'acl-deny-write', 'ifeo-block',
-    'reg-set', 'reg-delete-key', 'shellext-block', 'toast-off', 'firewall-block-program', 'hosts-block', 'preboot-file-edit',
-    'ini-set', 'json-set', 'hook')
+    'reg-set', 'reg-delete-key', 'reg-delete-value', 'browser-ext-block', 'shellext-block', 'toast-off', 'firewall-block-program',
+    'hosts-block', 'preboot-file-edit', 'ini-set', 'json-set', 'hook')
+$script:AdRegKinds = @('DWord', 'QWord', 'String', 'ExpandString', 'MultiString', 'Binary')
+# Why a manifest regex field is unusable, or $null. A pattern that matches the empty string matches every name.
+function Get-AdRegexRefusal($rx, [string]$what) {
+    if ($rx -isnot [string] -or -not $rx) { return "$what must be a non-empty regex" }
+    try { $r = [regex]::new($rx) } catch { return "$what is not a valid regex: $rx" }
+    if ($r.IsMatch('')) { return "$what /$rx/ matches an empty string, so it would match everything" }
+    $null
+}
 $script:AdCategories = @('ad', 'ai', 'telemetry', 'updater', 'repair', 'promo')
 $script:AdEvidence = @('observed', 'anchored', 'inferred', 'hypothesis')
 $script:AdEvidenceActive = @('observed', 'anchored')
@@ -1471,6 +1701,34 @@ function Test-AdManifest($m) {
             if ($ptr -notmatch '^/.') { $err.Add("$id`: json-set needs 'pointer', a JSON pointer such as /browser/show_ads") }
             elseif (@($ptr.Substring(1).Split('/')) -contains '-') { $err.Add("$id`: json-set pointer may not use '-' (array append)") }
         }
+        if ($t -eq 'reg-set') {
+            $k = AdGet $a 'kind' 'DWord'
+            if ($script:AdRegKinds -notcontains $k) { $err.Add("$id`: kind must be one of $($script:AdRegKinds -join ', ')") }
+            elseif ($k -eq 'Binary') {
+                $vs = AdGet $a 'values'; $bv = if ($vs) { @($vs.PSObject.Properties | ForEach-Object { $_.Value }) } else { @(, (AdGet $a 'value')) }
+                foreach ($v in $bv) { $ok = $v -is [string]; if ($ok) { try { [void](ConvertTo-AdHex $v) } catch { $ok = $false } }; if (-not $ok) { $err.Add("$id`: a Binary value is a hex byte string such as ""03 00 00 00"": '$v'") } }
+            }
+        }
+        if ($t -eq 'reg-delete-key') {
+            foreach ($f in 'match', 'matchDefault') { if ($null -ne (AdGet $a $f)) { $why = Get-AdRegexRefusal (AdGet $a $f) $f; if ($why) { $err.Add("$id`: $why") } } }
+        }
+        if ($t -eq 'reg-delete-value') {
+            $tg = @(AdGet $a 'target' @())
+            if (-not $tg.Count -or @($tg | Where-Object { $_ -isnot [string] -or $_ -notmatch '^(?i)(HKLM|HKEY_LOCAL_MACHINE|HKLM:|HKCU|HKEY_CURRENT_USER|HKCU:)\\.' }).Count) { $err.Add("$id`: target lists registry keys (HKLM\... or HKCU\..., * and ? allowed in a segment)") }
+            $np = $a.PSObject.Properties['names']; $mx = AdGet $a 'match'
+            if ([bool]$np -eq ($null -ne $mx)) { $err.Add("$id`: reg-delete-value needs exactly one of names[] or match") }
+            if ($np -and (-not @($np.Value).Count -or @(@($np.Value) | Where-Object { $_ -isnot [string] -or -not $_ }).Count)) { $err.Add("$id`: names lists value names (the default value is never deleted)") }
+            if ($null -ne $mx) { $why = Get-AdRegexRefusal $mx 'match'; if ($why) { $err.Add("$id`: $why") } }
+        }
+        if ($t -eq 'browser-ext-block') {
+            $xs = @(AdGet $a 'ids' @())
+            if (-not $xs.Count -or @($xs | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[a-p]{32}$' }).Count) { $err.Add("$id`: ids lists extension ids (32 lowercase letters a to p)") }
+            $dup = @($xs | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+            if ($dup.Count) { $err.Add("$id`: ids lists $($dup -join ', ') more than once") }
+            $bp = $a.PSObject.Properties['browsers']
+            if ($bp -and (-not @($bp.Value).Count -or @(@($bp.Value) | Where-Object { -not $script:AdBrowsers.Contains("$_".ToLowerInvariant()) }).Count)) { $err.Add("$id`: browsers lists $($script:AdBrowsers.Keys -join ' and/or ')") }
+        }
+        if ($t -eq 'firewall-block-program' -and @('Inbound', 'Outbound') -notcontains (AdGet $a 'direction' 'Outbound')) { $err.Add("$id`: direction must be Inbound or Outbound") }
         if ($t -eq 'hosts-block' -and (AdGet $a 'reapply' $false) -and -not (AdGet $a 'acknowledgeFlagging' $false)) { $err.Add("$id`: hosts-block needs acknowledgeFlagging") }
         if ($t -eq 'acl-deny-write' -and @('write', 'write+protect') -notcontains (AdGet $a 'rights' 'write')) { $err.Add("$id`: rights must be write (default) or write+protect") }
     }
@@ -1505,11 +1763,16 @@ function Find-AdUninstallEntries($rule) {
     }
     $found
 }
-function Get-AdDirFromCommand([string]$cmd) {
+# The program a command line starts (quoted path, or the text up to the first '.exe'), environment variables expanded.
+function Get-AdCommandExe([string]$cmd) {
     if (-not $cmd) { return $null }
     $c = $cmd.Trim()
     if ($c.StartsWith('"')) { $j = $c.IndexOf('"', 1); if ($j -lt 0) { return $null }; $c = $c.Substring(1, $j - 1) } else { $c = ($c -split ',')[0]; if ($c -match '^(.+?\.exe)') { $c = $Matches[1] } }
-    $c = [Environment]::ExpandEnvironmentVariables($c)
+    [Environment]::ExpandEnvironmentVariables($c)
+}
+function Get-AdDirFromCommand([string]$cmd) {
+    $c = Get-AdCommandExe $cmd
+    if (-not $c) { return $null }
     try { [IO.Path]::GetDirectoryName($c) } catch { $null }
 }
 # Vendor identity of a candidate root. Applies to every source, including -InstallRoot and the environment
@@ -1714,15 +1977,17 @@ function New-AdItem($a, [string]$prim, [string]$key, [string]$desc, $data, $orig
                        Reapply = [bool](AdGet $a 'reapply' $false); Evidence = AdGet $a 'evidence'; Known = $null }
 }
 # The object an item changes, named the way an action's target list names it: service name, \Folder\TaskName,
-# file or folder path, exe name, HKLM\Key\Value (reg-set, shellext-block, toast-off), HKLM\Key (deleted keys),
-# program path (firewall), the hook's own item key. knownFailure.targets entries are matched against it.
+# file or folder path, exe name, HKLM\Key\Value (reg-set, reg-delete-value, shellext-block, toast-off), HKLM\Key
+# (deleted keys), browser:id (browser-ext-block), program path (firewall), the hook's own item key.
+# knownFailure.targets entries are matched against it.
 function Get-AdItemSubject($it) {
     $d = $it.Data
     switch ($it.Prim) {
         'service' { return $d.name }
         'task' { return "$($d.path)$($d.name)" }
         'ifeo' { return $d.name }
-        'regset' { return "$($d.hive)\$($d.sub)\$($d.name)" }
+        { @('regset', 'regval') -contains $_ } { return "$($d.hive)\$($d.sub)\$($d.name)" }
+        'extblock' { return "$($d.browser):$($d.id)" }
         'regdel' { return "$($d.hive)\$($d.parent)\$($d.name)" }
         'firewall' { return $d.program }
         'hook' { return $it.Key.Substring($it.Key.IndexOf('|') + 1) }
@@ -1768,14 +2033,16 @@ function Write-AdItemFailure($it, $er) {
 }
 function Get-AdRegSetItem($a, [string]$hive, $view, [string]$sub, [string]$name, $value, [string]$kind, [string]$desc) {
     $cur = Get-AdRegValue $hive $view $sub $name
-    if ($cur.exists -and (Test-AdSame $cur.value $value)) { Say 'SKIP' "$desc (already set)"; return }
+    # The kind counts too: the String '030000' is not the Binary 03 00 00.
+    if ($cur.exists -and $cur.kind -eq $kind -and (Test-AdSame $cur.value $value)) { Say 'SKIP' "$desc (already set)"; return }
+    if ($cur.kind -eq 'Unknown') { throw "$hive\$sub $name holds data of a kind that cannot be journaled, so it could not be restored; not changed" }
     New-AdItem $a 'regset' "reg:$hive$view\$sub|$name" $desc @{ hive = $hive; view = "$view"; sub = $sub; name = $name; value = $value; kind = $kind } $cur ([ordered]@{ exists = $true; value = $value; kind = $kind })
 }
 function Get-AdRegDelItem($a, [string]$hive, $view, [string]$parent, [string]$name) {
     $sub = "$parent\$name"
     $why = Get-AdRegKeyRefusal $sub; if ($why) { throw $why }
     if (-not (Test-AdRegKey $hive $view $sub)) { return }
-    New-AdItem $a 'regdel' "regkey:$hive$view\$sub" "Delete registry key $hive\$sub" @{ hive = $hive; view = "$view"; parent = $parent; name = $name } @{ export = $null } ([ordered]@{ keyExists = $false })
+    New-AdItem $a 'regdel' "regkey:$hive$view\$sub" "Delete registry key $hive\$sub$(if ("$view" -eq '32' -and $hive -eq 'HKLM') { ' (32-bit view)' })" @{ hive = $hive; view = "$view"; parent = $parent; name = $name } @{ export = $null } ([ordered]@{ keyExists = $false })
 }
 function Get-AdTargets($a) {
     $t = @(AdGet $a 'target' @())
@@ -1954,18 +2221,92 @@ function Get-AdActionPlan($a) {
             $vals = AdGet $a 'values'
             $pairs = @(); if ($vals) { foreach ($p in $vals.PSObject.Properties) { $pairs += , @($p.Name, $p.Value) } } else { $pairs += , @((AdGet $a 'name'), (AdGet $a 'value')) }
             foreach ($p in $pairs) {
-                $it = Get-AdRegSetItem $a $hp[0] $view $hp[1] $p[0] $p[1] $kind "Set $($hp[0])\$($hp[1]) $($p[0]) = $($p[1])"
+                $v = if ($kind -eq 'Binary') { ConvertTo-AdHex $p[1] } else { $p[1] }
+                $it = Get-AdRegSetItem $a $hp[0] $view $hp[1] $p[0] $v $kind "Set $($hp[0])\$($hp[1]) $($p[0]) = $(if ($kind -eq 'Binary') { "hex $v" } else { $v })"
                 if ($it) { $items.Add($it) }
             }
         }
         'reg-delete-key' {
             foreach ($t in @(AdGet $a 'target' @())) {
-                $hp = Split-AdRegPath $t; $view = AdGet $a 'view' 64; $match = AdGet $a 'match'
-                if ($match) {
-                    foreach ($n in (Get-AdRegSubKeys $hp[0] $view $hp[1])) { if ($n -match $match) { $it = Get-AdRegDelItem $a $hp[0] $view $hp[1] $n; if ($it) { $items.Add($it) } } }
+                $hp = Split-AdRegPath $t; $view = AdGet $a 'view' 64; $match = AdGet $a 'match'; $md = AdGet $a 'matchDefault'
+                if ($match -or $md) {
+                    # match tests the subkey name, matchDefault its default value as stored (environment variables not
+                    # expanded); with both, a subkey must pass both.
+                    $hits = 0
+                    foreach ($n in (Get-AdRegSubKeys $hp[0] $view $hp[1])) {
+                        if ($match -and $n -notmatch $match) { continue }
+                        if ($md -and "$((Get-AdRegValue $hp[0] $view "$($hp[1])\$n" '').value)" -notmatch $md) { continue }
+                        $hits++; $it = Get-AdRegDelItem $a $hp[0] $view $hp[1] $n; if ($it) { $items.Add($it) }
+                    }
+                    if (-not $hits) { Say 'SKIP' "${t}: no subkey matches$(if ($match) { " name /$match/" })$(if ($match -and $md) { ' and' })$(if ($md) { " default value /$md/" }) (view $view)" }
                 } else {
                     $i = $hp[1].LastIndexOf('\'); $it = Get-AdRegDelItem $a $hp[0] $view $hp[1].Substring(0, $i) $hp[1].Substring($i + 1)
                     if ($it) { $items.Add($it) } else { Say 'SKIP' "$t not present" }
+                }
+            }
+        }
+        'reg-delete-value' {
+            # One item per value: names[] (exact, case-insensitive) or match (regex over the value names) in every key
+            # target names (* and ? allowed per segment). Each value is checked by Get-AdRegValueRefusal first.
+            $view = AdGet $a 'view' 64; $match = AdGet $a 'match'; $names = @(AdGet $a 'names' @())
+            foreach ($t in @(AdGet $a 'target' @())) {
+                $hp = Split-AdRegPath $t; $hits = 0
+                $keys = @(Resolve-AdRegKeys $hp[0] $view $hp[1])
+                foreach ($sub in $keys) {
+                    $b = Open-AdHive $hp[0] $view; $k = $b.OpenSubKey($sub); $present = @(); if ($k) { $present = @($k.GetValueNames()); $k.Close() }; $b.Close()
+                    $pick = if ($match) { @($present | Where-Object { $_ -and $_ -match $match }) } else { @($present | Where-Object { $_ -and $names -contains $_ }) }
+                    foreach ($n in $pick) {
+                        $cur = Get-AdRegValue $hp[0] $view $sub $n
+                        if (-not $cur.exists) { continue }
+                        $why = Get-AdRegValueRefusal $sub $n $cur
+                        if ($why) { throw "refused value $($hp[0])\$sub $n`: $why" }
+                        $hits++
+                        $items.Add((New-AdItem $a 'regval' "regval:$($hp[0])$view\$sub|$n" "Delete registry value $($hp[0])\$sub $n (was $(Format-AdRegData $cur.kind $cur.value))" `
+                            @{ hive = $hp[0]; view = "$view"; sub = $sub; name = $n } ([ordered]@{ exists = $true; kind = $cur.kind; value = $cur.value }) ([ordered]@{ exists = $false })))
+                    }
+                }
+                if (-not $hits) {
+                    $what = if ($match) { "value matching /$match/" } else { "value named $($names -join ', ')" }
+                    Say 'SKIP' "${t}: no $what present ($(if ($keys.Count) { "$($keys.Count) key(s) searched" } else { 'key not present' }), view $view)"
+                }
+            }
+        }
+        'browser-ext-block' {
+            # ExtensionInstallBlocklist is a key of numbered REG_SZ values ("1", "2", ...), each holding one id. The
+            # browser takes the list from HKLM when HKLM has one, else from HKCU; the two are never merged, so a new
+            # HKLM list would switch off the owner's HKCU list. Ids therefore go into the list in force: HKCU when only
+            # HKCU has entries, else HKLM. An id that list already holds is a SKIP; otherwise it goes under the lowest
+            # free number, so no entry of the owner's own policy is ever overwritten.
+            $brs = @(@(AdGet $a 'browsers' @('chrome', 'edge')) | ForEach-Object { "$_".ToLowerInvariant() })
+            $xs = @(AdGet $a 'ids' @())
+            Say 'INFO' "$id`: while a policy value is set, $(($brs | ForEach-Object { $script:AdBrowsers[$_].Label }) -join ' and ') show$(if ($brs.Count -eq 1) { 's' }) 'Managed by your organization' (side effect of browser-ext-block)"
+            foreach ($br in $brs) {
+                $spec = $script:AdBrowsers[$br]; $lists = @{}
+                foreach ($p in $spec.Policy, $spec.UserPolicy) {
+                    $l = @{ Hive = $p[0]; View = $p[1]; Sub = "$($p[2])\ExtensionInstallBlocklist"; Held = @{}; Taken = @() }
+                    $b = Open-AdHive $l.Hive $l.View; $k = $b.OpenSubKey($l.Sub)
+                    if ($k) {
+                        foreach ($n in $k.GetValueNames()) { $l.Taken += $n; $v = $k.GetValue($n); if ($v -is [string]) { $l.Held[$v.Trim().ToLowerInvariant()] = $n } }
+                        $k.Close()
+                    }
+                    $b.Close(); $lists[$l.Hive] = $l
+                }
+                $use = if (-not $lists.HKLM.Taken.Count -and $lists.HKCU.Taken.Count) { $lists.HKCU } else { $lists.HKLM }
+                $hive = $use.Hive; $view = $use.View; $sub = $use.Sub; $held = $use.Held; $taken = $use.Taken
+                if ($hive -eq 'HKLM') {
+                    $off = @($lists.HKCU.Held.Keys | Where-Object { -not $held.ContainsKey($_) } | Sort-Object)
+                    if ($off.Count) { Say 'WARN' "$($spec.Label) ignores HKCU\$($lists.HKCU.Sub) while HKLM\$sub has entries (the lists are not merged), so these ids held only there are not blocked: $($off -join ', '); add them to the HKLM list" }
+                }
+                $missing = Get-AdRegMissingFrom $hive $view $sub
+                foreach ($x in $xs) {
+                    if ($held.ContainsKey($x)) { Say 'SKIP' "$($spec.Label) already blocks $x ($hive\$sub value $($held[$x]))"; continue }
+                    $n = 1; while ($taken -contains "$n") { $n++ }
+                    $taken += "$n"; $held[$x] = "$n"
+                    $items.Add((New-AdItem $a 'extblock' "extblock:$hive$view\$sub|$x" "Block browser extension $x in $($spec.Label): $hive\$sub value $n" `
+                        @{ hive = $hive; view = "$view"; sub = $sub; name = "$n"; id = $x; browser = $br } ([ordered]@{ exists = $false; created = $missing }) ([ordered]@{ name = "$n"; value = $x })))
+                }
+                if (AdGet $a 'removeExternal' $false) {
+                    foreach ($loc in $spec.External) { foreach ($x in $xs) { $it = Get-AdRegDelItem $a $loc[0] $loc[1] "$($loc[2])" $x; if ($it) { $items.Add($it) } } }
                 }
             }
         }
@@ -2020,10 +2361,16 @@ function Get-AdActionPlan($a) {
                 if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
                     Say 'SKIP' "$p not present$(if (@(Get-AdFirewallRules $name).Count) { "; rule $name still present; $left" })"; continue
                 }
-                if (@(Get-AdFirewallRules $name).Count) { Say 'SKIP' "firewall rule exists: $name"; continue }
-                $grp = "AppDebloat-$($script:Ad.AppId)"
-                $items.Add((New-AdItem $a 'firewall' "fw:$name" "Firewall: block $dir traffic of $p" @{ name = $name; program = $p; direction = $dir; group = $grp } @{ ruleExisted = $false } `
-                    ([ordered]@{ name = $name; program = $p; group = $grp })))
+                $grp = "AppDebloat-$($script:Ad.AppId)"; $rules = @(Get-AdFirewallRules $name); $was = ''
+                if ($rules.Count) {
+                    # A rebuilt manifest may have changed the direction: the tool's own rule (its group) is replaced.
+                    $other = @($rules | Where-Object { "$($_.Direction)" -ne $dir } | ForEach-Object { "$($_.Direction)" } | Select-Object -Unique)
+                    if (-not $other.Count) { Say 'SKIP' "firewall rule exists: $name"; continue }
+                    if (@($rules | Where-Object { "$($_.Group)" -ne $grp }).Count) { Say 'WARN' "firewall rule $name blocks $($other -join ', ') traffic, not $dir as the manifest asks, and is not in group $grp; left as is"; continue }
+                    $was = " (replaces the rule that blocks $($other -join ', ') traffic)"
+                }
+                $items.Add((New-AdItem $a 'firewall' "fw:$name" "Firewall: block $dir traffic of $p$was" @{ name = $name; program = $p; direction = $dir; group = $grp; replace = [bool]$rules.Count } @{ ruleExisted = $false } `
+                    ([ordered]@{ name = $name; program = $p; group = $grp; direction = $dir })))
             }
             # A glob target names nothing once its file is gone; the journal still knows the rules made for it.
             foreach ($e in @($script:Ad.Journal.Values)) {
@@ -2193,6 +2540,9 @@ function Invoke-AdItem($it) {
         $run = @(Get-AdRunningByPath @($d.owners))
         if ($run.Count) { Say 'WARN' "$($d.path) not edited while $($run -join ', ') runs (onlyWhenNotRunning); deferred: close it and run again"; return 'warned' }
     }
+    if ($it.Prim -eq 'extblock' -and (Get-AdRegValue $d.hive $d.view $d.sub $d.name).exists) {
+        Say 'WARN' "$($d.hive)\$($d.sub) value $($d.name) was taken after the plan was made; $($d.id) not written; deferred: run again"; return 'warned'
+    }
     if ($first -and -not (Test-Path -LiteralPath $script:Ad.StateDir)) { Protect-AdStateDir }
     if ($first -and $it.Prim -eq 'regdel') {
         $dir = Join-Path $script:Ad.StateDir 'regkeys'; if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
@@ -2305,7 +2655,22 @@ function Invoke-AdItem($it) {
                 }
             }
         }
-        'firewall' { New-NetFirewallRule -DisplayName $d.name -Group $d.group -Direction $d.direction -Action Block -Program $d.program | Out-Null }
+        { @('regval', 'extblock') -contains $_ } {
+            # A failure is handed back, not thrown (see New-AdFailure), so a known failure leaves no TerminatingError.
+            $err = $null; $b = Open-AdHive $d.hive $d.view; $k = $null
+            try {
+                if ($it.Prim -eq 'regval') { $k = $b.OpenSubKey($d.sub, $true); if ($k) { $k.DeleteValue($d.name, $false) } }
+                else { Set-AdRegValue $d.hive $d.view $d.sub $d.name $d.id 'String' }
+            } catch { $err = $_ } finally { if ($k) { $k.Close() }; $b.Close() }
+            if ($err) {
+                $what = if ($it.Prim -eq 'regval') { "delete $($d.hive)\$($d.sub) value $($d.name)" } else { "write $($d.hive)\$($d.sub) value $($d.name)" }
+                return (New-AdFailure "cannot ${what}: $($err.Exception.GetBaseException().Message)" $(if (Test-AdAccessDenied $err) { 5 } else { 0 }))
+            }
+        }
+        'firewall' {
+            if (AdGet $d 'replace' $false) { foreach ($r in @(Get-AdFirewallRules $d.name)) { if ("$($r.Group)" -eq $d.group) { Remove-NetFirewallRule -Name $r.Name -ErrorAction Stop } } }
+            New-NetFirewallRule -DisplayName $d.name -Group $d.group -Direction $d.direction -Action Block -Program $d.program | Out-Null
+        }
         'hosts' {
             $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
             [IO.File]::AppendAllText($hosts, "`r`n" + ($d.lines -join "`r`n") + "`r`n", [Text.Encoding]::ASCII)
@@ -2407,10 +2772,11 @@ function Invoke-AdUndo($e) {
         }
         'regset' {
             $cur = Get-AdRegValue $d.hive $d.view $d.sub $d.name
-            $isOrig = if (AdGet $o 'exists') { $cur.exists -and (Test-AdSame $cur.value (AdGet $o 'value')) } else { -not $cur.exists }
+            $ov = AdGet $o 'value'; if ((AdGet $o 'kind') -eq 'Binary' -or (AdGet $o 'kind') -eq 'None') { $ov = ConvertTo-AdHex $ov }
+            $isOrig = if (AdGet $o 'exists') { $cur.exists -and $cur.kind -eq (AdGet $o 'kind') -and (Test-AdSame $cur.value $ov) } else { -not $cur.exists }
             if ($isOrig) { return "SKIP $($d.hive)\$($d.sub) $($d.name) already has its original value" }
-            if (-not ($cur.exists -and (Test-AdSame $cur.value (AdGet $af 'value')))) {
-                $now = if ($cur.exists) { "'$(@($cur.value) -join ',')'" } else { 'absent' }
+            if (-not ($cur.exists -and $cur.kind -eq (AdGet $af 'kind') -and (Test-AdSame $cur.value (AdGet $af 'value')))) {
+                $now = if ($cur.exists) { Format-AdRegData $cur.kind $cur.value } else { 'absent' }
                 return "CONFLICT $($d.hive)\$($d.sub) $($d.name) is now $now, not '$(@(AdGet $af 'value') -join ',')' as the tool wrote it; left as is"
             }
             if (AdGet $o 'exists') { Set-AdRegValue $d.hive $d.view $d.sub $d.name (AdGet $o 'value') (AdGet $o 'kind') }
@@ -2428,14 +2794,36 @@ function Invoke-AdUndo($e) {
             if (-not $f -or -not (Test-Path -LiteralPath $f)) { return "WARN no export for $key" }
             Invoke-AdNative reg.exe @('import', $f, "/reg:$($d.view)") | Out-Null
         }
+        'regval' {
+            # The tool deleted the value: it comes back only while it is still absent and its key still exists.
+            $key = "$($d.hive)\$($d.sub)"
+            if (-not (Test-AdRegKey $d.hive $d.view $d.sub)) { return "GONE $key no longer exists; value $($d.name) not re-created" }
+            $cur = Get-AdRegValue $d.hive $d.view $d.sub $d.name
+            if ($cur.exists) {
+                if ($cur.kind -eq (AdGet $o 'kind') -and (Test-AdSame $cur.value (AdGet $o 'value'))) { return "SKIP $key $($d.name) already has its original value" }
+                return "CONFLICT $key $($d.name) now holds $(Format-AdRegData $cur.kind $cur.value), not absent as the tool left it, nor its original $(Format-AdRegData (AdGet $o 'kind') (AdGet $o 'value')); left as is"
+            }
+            Set-AdRegValue $d.hive $d.view $d.sub $d.name (AdGet $o 'value') (AdGet $o 'kind')
+        }
+        'extblock' {
+            # Only the value the tool wrote goes, while it still holds the id; then the keys the tool created, while empty.
+            $key = "$($d.hive)\$($d.sub)"; $n = [string](AdGet $af 'name'); $x = [string](AdGet $af 'value')
+            $cur = Get-AdRegValue $d.hive $d.view $d.sub $n; $r = $null
+            if (-not $cur.exists) { $r = "SKIP $key value $n ($x) already removed" }
+            elseif (@('String', 'ExpandString') -notcontains $cur.kind -or "$($cur.value)".Trim() -ine $x) { return "CONFLICT $key value $n now holds $(Format-AdRegData $cur.kind $cur.value), not '$x' as the tool wrote it; left as is" }
+            else { $b = Open-AdHive $d.hive $d.view; $k = $b.OpenSubKey($d.sub, $true); try { $k.DeleteValue($n) } finally { $k.Close(); $b.Close() } }
+            $top = AdGet $o 'created'
+            if ($top) { Remove-AdEmptyRegKeys $d.hive $d.view $d.sub ([string]$top) }
+            return $r
+        }
         'firewall' {
             $rules = @(Get-AdFirewallRules $d.name)
             if (-not $rules) { return "SKIP firewall rule $($d.name) already removed" }
-            $res = @()
+            $res = @(); $adir = AdGet $af 'direction'   # older journals do not record it
             foreach ($r in $rules) {
                 $prog = (Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r -ErrorAction Stop).Program
-                if ("$($r.Group)" -eq (AdGet $af 'group') -and $prog -ieq (AdGet $af 'program')) { Remove-NetFirewallRule -Name $r.Name -ErrorAction Stop }
-                else { $res += "CONFLICT firewall rule '$($d.name)' ($($r.Name)) now has group '$($r.Group)' and program '$prog'; left as is" }
+                if ("$($r.Group)" -eq (AdGet $af 'group') -and $prog -ieq (AdGet $af 'program') -and (-not $adir -or "$($r.Direction)" -eq $adir)) { Remove-NetFirewallRule -Name $r.Name -ErrorAction Stop }
+                else { $res += "CONFLICT firewall rule '$($d.name)' ($($r.Name)) now has group '$($r.Group)', program '$prog' and direction $($r.Direction); left as is" }
             }
             return $res
         }
@@ -2577,8 +2965,8 @@ function Write-AdDenialDiagnostics($it) {
             $at = AdGet $it 'FailedAt' (Get-Date)
             Write-AdDiagLines 'System log event 7006 (Service Control Manager) within 5 s of the failure (it names no service: matched by time only):' { Get-AdScmDenialEvents $at }
         }
-        { @('regset', 'regdel', 'ifeo') -contains $_ } {
-            $sub = switch ($it.Prim) { 'regset' { $d.sub } 'regdel' { "$($d.parent)\$($d.name)" } 'ifeo' { "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$($d.name)" } }
+        { @('regset', 'regdel', 'ifeo', 'regval', 'extblock') -contains $_ } {
+            $sub = switch ($it.Prim) { 'regdel' { "$($d.parent)\$($d.name)" } 'ifeo' { "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$($d.name)" } default { $d.sub } }
             $hv = if ($it.Prim -eq 'ifeo') { 'HKLM' } else { $d.hive }; $vw = if ($it.Prim -eq 'ifeo') { 64 } else { $d.view }
             Write-AdDiagLines "registry key $hv\$sub owner and access:" {
                 $b = Open-AdHive $hv $vw

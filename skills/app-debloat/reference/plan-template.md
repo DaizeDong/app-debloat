@@ -96,6 +96,14 @@ Must contain:
 - **Residual risks**: concrete ones for this app (for example "the main window may re-enable the AI panel after a server switch; L-GATE-004 is inferred").
 - **Security-update cost** (required whenever an action blocks the updater of a browser engine, an embedded Chromium or another network-facing component): the engine version that is now frozen, that it will miss security fixes, and how the owner updates by hand (re-run the vendor installer, then P1 to P3 and `-Install`).
 - **Server-pushed in-window content**: ads, popups and promotions drawn inside the app's own window from a remote config are a documented residual unless the owner opts into network-level blocking (router, DNS filter or proxy rule they run themselves). Name the config source and the probe that shows it.
+- **Settings Map** (`reference/ledger.md`, Settings Map): one row per in-app switch that matters to the plan, from its `GATE` entry: key, storage (`plain`, `encrypted`, `server`), default, current value, menu path, engine-reachable, lever. Switches the plan sets show their toggle probe (`VER` ID, or `proposed`). Switches only the owner can flip (encrypted, server-side, or a plain one the owner chose to keep in their hands) are listed as owner actions with the menu path and the value to choose, including those to re-check after each update because an update dialog offers them pre-ticked.
+
+  ```
+  | Key                  | Storage   | Default | Current | Menu Path                              | Engine-Reachable | Lever          | Evidence                 |
+  |----------------------|-----------|---------|---------|----------------------------------------|------------------|----------------|--------------------------|
+  | [Main] ContextMenu   | plain     | 1       | 0       | Settings > General > Right-click menu  | yes              | ini-set A-07   | L-GATE-009, L-VER-004    |
+  | clipboardWatch       | encrypted | on      | unknown | Settings > Notifications > Clipboard   | no               | owner action   | L-GATE-010 (anchored)    |
+  ```
 - **Unresolved areas**: every open `hypothesis` and `unknown` that touches the plan, with the probe that would settle it.
 - **Validation split**: two separate lists. `Proposed checks`: what P6 will do. `Validation performed`: what was actually run, when, on which version, with results and `VER` IDs. Do not merge them, and do not describe a proposed check in the past tense.
 
@@ -109,5 +117,6 @@ Must contain:
 - Every `keep` and every untouched candidate has a reason and IDs.
 - Every return path in the ledger appears in the durability matrix.
 - Every action deferred while the app runs is listed in section 3 with its gap, and section 3 says whether the app keeps running after its window is closed.
+- Section 5 has the Settings Map: every switch the plan sets has its toggle probe, and every switch only the owner can flip is an owner action with its menu path.
 - Every action has original state, ownership, undo with a conflict rule, and a place in the rollback order.
 - No sentence claims complete blocking without a `VER` entry behind it.

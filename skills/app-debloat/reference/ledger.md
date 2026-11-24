@@ -217,6 +217,7 @@ output back into the binary or the analysis database as if it were vendor text.
   | UpdHelper.exe -> PopNews.exe | ShellExecuteExW, `-silent` | `[Setting] NewsPush` in `%ProgramData%\AcmeCorp\ExampleApp\app.ini` | L-EDGE-003 (observed), L-GATE-002 (inferred) |
 
 - Reinstall vectors: one row per `L-RI` entry with how its block is verified.
+- Settings Map: one row per setting entry (see Settings Map below).
 - Checkpoint answers: one section per stage (`P0` to `P4`) listing that stage's answer entries
   (`stage` field) by ID; the `Contract` section lists the `CORE` entries.
 - Open hypotheses: every `hypothesis` entry with the probe that would settle it. This list is the
@@ -249,6 +250,51 @@ Rules for the plan:
   repair or update trigger, after the delayed re-read). A failed check is a `VER` entry with status
   `negative` and a pointer to the follow-up action.
 
+## Settings Map
+
+Every in-app switch found at P2 (`pipeline.md` P2 step 6) is a `GATE` entry with a `setting` object,
+whether or not the plan uses it. The map is how the owner learns which switches only they can flip,
+and how the plan shows that each switch it sets was probed.
+
+```json
+{"id": "L-GATE-009", "kind": "GATE", "stage": "P2", "checkpoint": "settings map",
+ "claim": "config.ini [Main] ContextMenu decides whether ExampleApp adds its right-click entry (0 = off).",
+ "gate": "%LOCALAPPDATA%\\AcmeCorp\\ExampleApp\\config.ini [Main] ContextMenu",
+ "setting": {"key": "[Main] ContextMenu", "storage": "plain", "format": "ini", "default": "1", "current": "0",
+             "menu_path": "Settings > General > Add to right-click menu", "engine_reachable": true,
+             "lever": "ini-set, onlyWhenNotRunning ExampleApp.exe", "probe": "L-VER-004"},
+ "status": "observed", "app_version": "2.3.1",
+ "anchors": [{"type": "file", "path": "%LOCALAPPDATA%\\AcmeCorp\\ExampleApp\\config.ini", "sha256": "<64 hex>",
+              "locator": "[Main] ContextMenu"}],
+ "depends_on": ["L-VER-004"], "created": "2026-01-15", "notes": ""}
+```
+
+`setting` fields:
+
+| Field | Content |
+|---|---|
+| `key` | the key as stored: ini section and key, JSON pointer, registry value, environment variable, remote config key |
+| `storage` | `plain` (the engine or a text editor can read and write it), `encrypted` (opaque, only the app writes it) or `server` (remote config or the account) |
+| `format` | `ini`, `json`, `xml`, `registry`, `env`, `sqlite`, `blob` or `remote` |
+| `default` | the value on a fresh profile, or `unknown` |
+| `current` | the value read at P2, or `unknown` (encrypted and server values usually are) |
+| `menu_path` | where the owner flips it in the app's UI, or `none` |
+| `engine_reachable` | `true` only when an engine type writes it: `ini-set`, `json-set`, `reg-set` (registry and `HKCU\Environment`). SQLite, encrypted and server settings are `false` |
+| `lever` | the action type and options the plan would use, `owner action`, or `none` |
+| `probe` | the `VER` entry of the one toggle probe, or `none` while not probed |
+
+`analysis.md` draws the map from these entries, one row each:
+
+| Key | Storage | Default | Current | Menu Path | Engine-Reachable | Lever | Evidence |
+|---|---|---|---|---|---|---|---|
+| `[Main] ContextMenu` (config.ini) | plain | 1 | 0 | Settings > General > Add to right-click menu | yes | `ini-set` | L-GATE-009 (observed), probe L-VER-004 |
+| `clipboardWatch` (user conf) | encrypted | on | unknown | Settings > Notifications > Detect links in the clipboard | no | owner action | L-GATE-010 (anchored) |
+| `p2p_upload_ratio` (remote config) | server | 0 | 0 | Transfers > Speed boost | no | none (residual) | L-GATE-011 (inferred) |
+
+A switch the plan sets needs its probe (flip with the app closed, start it, check that the value held
+and the behavior changed) before the action can be a default; a switch only the owner can flip goes
+to `plan.md` section 5 as an owner action with its menu path.
+
 ## Mapping Tool Output to Anchors
 
 | Tool output | Ledger use |
@@ -266,4 +312,9 @@ Rules for the plan:
 | `snapshot_diff.py` `capped` on a file category | no add/remove evidence for that root; rerun with a higher `-MaxFiles` or diff the specific files |
 | `elevated_readonly.ps1` `prefetch.json` (`exes[].pf`, `coverage`) | a `log` anchor (source Prefetch, the `.pf` file name and its times) that the exe ran, most recently around the `.pf` last-write time; an exe with no `.pf` is `negative` only for the window from `coverage.oldest_created` to `coverage.newest_written` (Prefetch may have been cleared or evicted before it, and nothing after the newest write is covered), only with prefetching on (`enable_prefetcher`), and only when `coverage.sysmain_state` is `Running` (SysMain writes the `.pf` files; stopped or disabled, as on many debloated machines, it records nothing and a missing `.pf` proves nothing) |
 | `new_files_since.py` `files[]` | `INV` or `RI` lead for a binary or package written outside the roots; at most `inferred` until a launch capture or the vendor's log ties the write to the app |
+| `inventory.ps1` `browser`, `office_addins`, `shell_namespace`, `dormant_payloads`, `upnp` items | `INV` entries with `snapshot` anchors; a dormant payload's trigger (the switch or verb that registers it) is a `GATE` or `EDGE` of its own, `hypothesis` until shown. A section with no item and no access failure is a `negative` with that section as its coverage |
+| `inventory.ps1` `settings` keys, `opaque` files, SQLite candidates | Settings Map `GATE` entries with `file` anchors (locator: section and key, or JSON pointer); an `opaque` file means storage `encrypted` |
+| `strscan.py` `hits[].samples[]` (`offset`, `rva`, `section`), `tokens[]` (`first_offset`, `first_rva`, `section`), file `sha256` | a `pe` anchor for one string (file, sha256, rva, what it names); a lead, `inferred` at most, until `pe_triage.py --grep` with that sample's or token's `grep` field (the string regex-escaped) gives the xref chain to the call or a capture shows it run |
+| `launch_monitor.ps1` `sample`, `sample_summary` | `log` anchor for a resource-use claim: process, window, CPU seconds, peak working set, I/O bytes, socket counts |
+| `launch_monitor.ps1` `conn` with `listen_scope` `all`, proc lines with `remote_debugging` | `NET` entry for a listener reachable from the network, or an open debugging endpoint |
 | `launch_monitor.ps1` `proc_*` lines with `name_match: true` | a line whose `reason` is `root` or `service` is already tied to the app (its image or service binary is under a root), and one with `child` or `launched` through the parent chain; a line with `reason` `name` (always `under_root: false`, since `root` and `service` take priority) stays `hypothesis` unless the vendor's log names the process at that time (`pipeline-field-notes.md`, P6) |

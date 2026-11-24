@@ -25,6 +25,26 @@ Observed in one run on one 8.x build; unverified for other builds.
 - **`BaiduNetdiskUtility` SYSTEM service reads its config from a user-writable path.** Any process running as the user could change what a SYSTEM service does, which is a local privilege escalation risk. Tell the owner even if the plan does not touch it. Disabling the service removes that risk, but its role in transfers is not mapped: ship the disable as an option and promote it only after a real upload and download (probes 3 and 4) and a reboot pass with it applied.
 - **Module checks across bitness**: some hosts are 32-bit. A 64-bit `tasklist /m` misses their modules; use `scripts/list_modules.ps1 -ImagePathRegex <root regex>` or the module lists from `scripts/elevated_readonly.ps1` before deciding a DLL is unused, and again in P6.
 
+## Cross-App Hijacks and Resource Use
+
+From one read-only sweep per client (`pipeline.md` P1 steps 5 and 6); unverified for other builds. Levers are in `levers.md`, Hijack Recipes.
+
+Baidu Netdisk 8.x:
+- **BitTorrent Engine and UPnP.** The transfer host carries a full BitTorrent engine (a Transmission build) that opens TCP and UDP on all interfaces at every start, runs DHT and local peer discovery, and asks the router for UPnP and NAT-PMP mappings. Vendor inbound allow rules for every profile, Public included, expose it. P2P upload sharing ("download acceleration") is a separate setting, off by default in that build, with rollout parameters pushed from the server. Detection: `conn` lines with `listen_scope` `all`, the inventory `upnp` section, `strscan.py --set p2p`. Lever: Inbound Block for P2P on the transfer host and on every exe a vendor inbound rule names, promoted after the owner's download test.
+- **Overlay Squatting.** Several overlay identifiers named with leading spaces take Explorer's first slots and push other sync clients' overlays past the limit, for a sync folder the owner may not use. Lever: Overlay Removal, only when the owner does not use the vendor's sync space; ask whether other apps' sync icons are missing.
+- **Log Upload with Tokens on the Command Line.** A help utility starts about ten minutes after launch with a report-log command and uploads logs; its command line carried the account session values in clear. `launch_monitor.ps1`, `inventory.ps1` and `elevated_readonly.ps1` redact them (`safety.md` section 10). A capture from another tool must be redacted before it reaches DATA. Lever: outbound `firewall-block-program` on that utility (it is not the transfer host).
+- **AppX Notification Channel.** A second Store package next to the desktop client serves pushes and toasts, with its own outbound firewall allow. A plain app regex misses it; match it by the manifest display name (inventory `appx`). Levers: `toast-off` on its AppUserModelID, and a placeholder on the bundled package file under the root that re-installs it.
+- **Power-Plan Write.** A "compatibility mode" setting rewrites the processor boost mode of the system power plan. No lever: the owner keeps it off (Settings Map), and P6 compares the boost mode before and after.
+- **Dormant Integrations.** Office and WPS add-in DLLs, a browser extension the client can side-load (cookies, web requests, all sites), a sparse AI package and a This PC namespace entry ship unregistered and are switched on by in-app dialogs. Record each with its trigger. Levers: a placeholder on the add-in DLLs, `browser-ext-block` (option), a placeholder on the package file.
+- **Encrypted Settings.** Floating ball, screenshot hotkey, clipboard link detection, product recommendations and AI authorization live in encrypted user config or on the server: owner actions in the Settings Map. Update dialogs can offer some again pre-ticked (the default image viewer), so the owner re-checks after each update.
+- **Idle Footprint.** About a dozen processes and over 1 GB of working set at idle, and extracted native modules left in a temp folder under Documents. Measure it with `launch_monitor.ps1 -Attach -Sample`, and add such folders as roots (`pipeline.md` P1 step 7).
+
+Quark 7.x (the drive inside a Chromium fork, `chromium-fork.md`):
+- **Staged Installer.** The main process downloads a full installer of the next version into the user data dir (`{userData}\updates`) and offers it with a "ready" prompt, outside the blocked updater. Lever: In-App Update Downloaders, a default as soon as it is observed: accepting the prompt moves the app out of `supported.versions`, and the watch task stops re-applying.
+- **Video Default Takeover with a Server Re-Check.** The app claims several video file types and re-checks them on a timer (about five minutes, configured by the server). Lever: Default-App Takeover (release, the owner picks again). If the app takes them back, look for its gate with one probe; otherwise it is a residual.
+- **Torrent and Magnet Ownership.** The `.torrent` association and the `magnet:` protocol are re-asserted at every launch. The app's URI-scheme registration switch releases them, but when it is the only magnet handler on the machine, releasing breaks magnet links: owner choice.
+- **Clipboard Watcher.** Watches the clipboard for share links and magnets. Only its plain JSON switch stops it (`json-set` with `onlyWhenNotRunning`; list the file in `core.preserve` and its folder in `allowedRoots`).
+
 ## Launch, Persistence and Re-Install Vectors
 
 | Vector | Typical form | Notes |
@@ -36,7 +56,9 @@ Observed in one run on one 8.x build; unverified for other builds.
 | Service | Utility service with SYSTEM rights | Disable, never delete |
 | Self-written IFEO keys | The vendor may create IFEO entries for its own host exe (the brief flags `baidunetdiskhost.exe`) | Record before touching; do not remove vendor IFEO keys blindly |
 | MSIX/Store wrapper | Store package that launches the desktop exe | Permissions on the MSIX do not constrain the desktop exe |
-| Shell integration | Context menu, sync-space namespace, media associations re-taken on update | |
+| Bundled packages | `.msix` or `.msixbundle` under the root that the client installs on demand (a notification channel, an AI package) | Placeholder on the package file; inventory `dormant_payloads` lists them |
+| In-app downloader | Full installer staged in the user data dir, offered at the next start | `levers.md`, In-App Update Downloaders |
+| Shell integration | Context menu, sync-space namespace, overlays, media associations re-taken on update | |
 
 ## Gates
 
@@ -61,6 +83,7 @@ Use:
 3. Disable the utility service if it is not in the contract; record start type and recovery actions.
 4. Disable autostart Run entries and tasks for helpers.
 5. `Shell Extensions\Blocked` for context menu handlers; remove only journaled namespace entries.
+6. Inbound block on the P2P listeners, overlay removal, the staged-installer folder lock and the add-in placeholders from Cross-App Hijacks above; `reg-delete-value` for single vendor values in shared keys (`OpenWithProgids`, `Run`).
 
 Avoid:
 
@@ -89,6 +112,8 @@ Use a dedicated test folder and a synthetic file (for example 1 MB of random byt
 6. If in the contract: start a download from the web page and confirm the client picks it up.
 7. Forced update check: no updater process, staging dir unchanged, version unchanged after restart and reboot.
 8. After 10 minutes idle: no popup windows (enumerate top-level windows by PID), no updater network traffic.
+9. With an inbound block applied: probes 3 and 4 still pass, every exe with a `listen_scope` `all` listener has its inbound rule (the listener itself stays; the rule is what stops outside connections), and the loopback hand-off listener still answers the browser (probe 6).
+10. Resource use idle, before and after apply, with `launch_monitor.ps1 -Attach -Sample` over the same window: process count, peak working set, CPU seconds and I/O bytes from `sample_summary`.
 
 ## Public Projects and Recipes
 

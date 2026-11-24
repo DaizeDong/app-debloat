@@ -181,7 +181,7 @@ function Test-Refs([string]$s) {
 }
 # Credential-like values in command lines become <redacted>; switch and parameter names stay.
 # The same rule is in launch_monitor.ps1 and inventory.ps1.
-$SecretName = '[\w.-]*?(?:token|stoken|bduss|session|password|passwd|secret|cookie|auth)[\w.-]*'
+$SecretName = '(?:[\w.-]*?(?:token|stoken|bduss|session|password|passwd|secret|cookie|auth)[\w.-]*|(?:[\w.-]*[_.-])?sid)'
 $StrongName = '[\w.-]*?(?:token|stoken|bduss|password|passwd|secret|cookie)[\w.-]*'
 $SecretRx = @(
     # -name value, --name=value, /name:value. After a token, bduss, password, secret or cookie switch the next

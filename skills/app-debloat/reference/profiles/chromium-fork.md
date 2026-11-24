@@ -23,6 +23,9 @@ Desktop apps that ship a whole Chromium browser under their own brand and hang o
 | Old version folder cleanup | The previous `<version>\` folder is deleted on the next start | Any action targeting a fixed version path drifts; resolve by name |
 | Installer or repair re-run | Full installer from the vendor CDN | Rewrites services, tasks and shortcuts |
 | Shell extensions re-registered on update | Context menu CLSIDs under HKLM and HKCU | |
+| Native messaging host rewritten at every launch | The main exe writes `NativeMessagingHosts\<name>` for Chrome and Edge (HKCU) at each start, pointing at a host manifest JSON in the version folder | A key delete is back at the next launch; placeholder the manifest JSON or the host exe (`levers.md`, Native Messaging Host). Dangling HKLM keys from an older install can stay behind too |
+| In-app update downloader | The main process stages a full installer of the next version under the user data dir and offers it with a prompt | Outside the blocked updater services; `levers.md`, In-App Update Downloaders |
+| Autostart value rewritten at every start | The Run value comes back each launch | `reg-set` kind `Binary` in the StartupApproved key of the Run value's hive: `StartupApproved\Run`, or HKLM `StartupApproved\Run32` for a `WOW6432Node` Run value (`levers.md`, Config Gate Off) |
 
 ## Updater Versions
 
@@ -35,6 +38,7 @@ Chromium-style updaters keep one folder per version (`<updater root>\<version>\u
 ## Gates
 
 - **`Local State` and `Preferences`**: plain JSON, read at start and rewritten on exit. Edit them only while the app is fully closed (background mode keeps it alive after the last window closes; stop it with `scripts/stop_app.ps1`). Use the engine's `json-set` action with a JSON pointer and `onlyWhenNotRunning`, and list the files in `core.preserve`.
+- **Background mode**: `Local State` `/background_mode/enabled` keeps the browser's processes, tray icons and any local listener alive after the last window closes, so actions with `onlyWhenNotRunning` wait until a full exit or a restart. `json-set` it to `false` while the app is closed. Ship it as an option until a close test (close every window, then list the processes with `launch_monitor.ps1 -Attach`) shows processes stay; then it is observed and may be a default. Say in plan section 3 whether it stays on.
 - **Secure Preferences MACs**: Chromium stores HMACs for protected preference keys. Editing a protected value makes the browser reset it or flag the profile. Prefer keys in `Local State` or unprotected `Preferences` keys; never compute or publish the MAC seed.
 - **Remote config**: find the key behind a popup by matching its timing, URL or text against the cached config, then confirm with a toggle test. Editing the cache is not durable (it is refetched). See `generic.md`, "Remote Config Popups".
 - **Command-line switches and policies**: Chromium enterprise policy keys may be honored by a fork, but they are machine-wide and also read by other Chromium browsers when the vendor reuses Google's policy path. Owner option only, never default.
@@ -55,6 +59,8 @@ Use:
 3. Wake tasks: disable, matched by action path pattern, re-scanned each run. Give the `task-disable` action a `taskPath` for the vendor folder (matched recursively) plus the name pattern; a bare name pattern searches only the root folder and finds nothing.
 4. Updater exes and the staged `new_<app>.exe` name: placeholder or IFEO on vendor-unique names (normal tier), re-asserted by `-Install`.
 5. Shell extension block for the context menu CLSIDs, suffixed forms included.
+6. Native messaging host: `reg-delete-key` on the host keys with `reapply`, plus a placeholder on the host manifest JSON once one launch shows the app starts cleanly without it.
+7. Staged installer folder under the user data dir: `acl-deny-write` with `emptyFirst` (folder in `allowedRoots`).
 
 Avoid:
 - Blocking or firewalling the main exe (it is the browser and the AI runtime host).

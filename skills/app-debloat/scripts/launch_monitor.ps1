@@ -22,10 +22,34 @@
 
   Process lines (proc_running, proc_start, proc_detail) carry the image path, the command line
   and the creation time when they are readable, plus for a service process the service name, its
-  PathName and the executable taken from it (service, service_path_name, service_image). Credential-like values in command lines become <redacted>, keeping the switch and
-  parameter names: switches and parameters whose name contains token, stoken, bduss, session,
-  password, passwd, secret, cookie or auth (access_token= included), JSON members with such
-  names, and Cookie and Authorization headers. A bare value with no name is not recognized.
+  PathName and the executable taken from it (service, service_path_name, service_image). A
+  command line that opens a browser debugging endpoint (--remote-debugging-port=N or
+  --remote-debugging-pipe) adds remote_debugging (port=N or pipe). Credential-like values in
+  command lines become <redacted>, keeping the switch and parameter names: switches and
+  parameters whose name contains token, stoken, bduss, session, password, passwd, secret, cookie
+  or auth (access_token= included), or is sid or ends in _sid, -sid or .sid, JSON members with
+  such names, and Cookie and Authorization headers. A bare value with no name is not recognized.
+
+  conn lines for a TCP listener and for every UDP endpoint carry listen_scope: loopback
+  (127.0.0.0/8, ::1), all (0.0.0.0, ::) or specific (one interface address). A listener on all
+  interfaces is reachable from the network unless a firewall rule blocks it; loopback is not
+  filtered by Windows Firewall at all.
+
+  With -Sample, a sample line every -SampleEverySeconds lists each tracked running process with
+  CPU seconds used since the previous sample (cpu_d_s, and cpu_pct as a share of all logical
+  processors, the way Task Manager shows it), total CPU seconds since it started (cpu_s), working
+  set and private bytes (ws_mb, priv_mb), I/O counts and bytes since the previous sample
+  (read_ops, write_ops, other_ops, read_bytes, write_bytes, other_bytes) and its TCP and UDP
+  socket counts (tcp_est, tcp_listen, udp), plus a total row. The numbers come from the same
+  Win32_Process poll that tracks processes (poll_t is its time), so they exist without
+  elevation for SYSTEM and other-user processes too. One poll takes about a second on a busy
+  machine, so an interval below a few seconds is not kept. since says what the deltas cover: prev (the previous sample), start
+  (the process started after it) or none (the first sample, or the first one that saw the
+  process). The I/O counters count every I/O the process issued (files, network, devices); they
+  are not disk traffic. A sample_summary line before end gives per process the CPU seconds and
+  I/O over the window, the average CPU share and the peak working set and private bytes, plus
+  totals and the peak of the summed working set. What a process used after the last sample
+  before it exited is not counted.
 
   When the shell is elevated, Win32_ProcessStartTrace events are also read. A child of a tracked
   process found that way is announced at once with its path, command line and creation time,
@@ -43,7 +67,8 @@
     - Connections show IP addresses; a proxy in TUN or global mode hides the real hosts.
 
   Line types: start, proc_running, proc_start, proc_detail, proc_exit, file, conn (each new
-  endpoint once), conn_count (every -ConnCountEverySeconds), note, end.
+  endpoint once), conn_count (every -ConnCountEverySeconds), sample and sample_summary (with
+  -Sample), note, end.
 
   The output is real-run DATA: write -Out to the private companion, never into the tool repo.
 
@@ -91,6 +116,22 @@
   Keep the literal user profile path and user name. By default they become %USERPROFILE% and
   %USERNAME%, like inventory.ps1.
 
+.PARAMETER Sample
+  Add resource samples (sample lines and a sample_summary line, above). Use it for the idle
+  sample, for an owner-run transfer or feature test, and wherever "resource use" is a finding.
+  The first sample follows the first poll (and the launch) as a baseline; a last one is taken
+  when -Seconds ends.
+
+.PARAMETER SampleEverySeconds
+  Interval of the sample lines with -Sample. Default 10.
+
+.PARAMETER Attach
+  Watch an app that is already running instead of one about to start: -Launch is refused, and
+  the run stops at once with an error (a note line says why) when no process is tracked after
+  the first poll, so an attach to an app that is not running does not wait out -Seconds.
+  Processes found running are proc_running lines; a child that was already running is tracked
+  only if its parent still runs.
+
 .EXAMPLE
   .\launch_monitor.ps1 -Root "$env:ProgramFiles\ExampleApp" -DataDir "$env:APPDATA\ExampleApp" `
       -Launch "$env:ProgramFiles\ExampleApp\ExampleApp.exe" -Seconds 1200 `
@@ -99,6 +140,10 @@
 .EXAMPLE
   # Elevated, for the process start trace: no -Launch. Start the app from a normal shell after the start line.
   .\launch_monitor.ps1 -Root "$env:ProgramFiles\ExampleApp" -Seconds 1200 -Out D:\private\launch.jsonl
+
+.EXAMPLE
+  # The app already runs (idle sample, or the owner runs one transfer meanwhile): attach and sample.
+  .\launch_monitor.ps1 -Root "$env:ProgramFiles\ExampleApp" -Attach -Sample -Seconds 300 -Out D:\private\sample.jsonl
 #>
 [CmdletBinding()]
 param(
@@ -112,9 +157,14 @@ param(
     [int]$ConnEverySeconds = 2,
     [int]$ConnCountEverySeconds = 60,
     [string]$WatchNames,
-    [switch]$KeepPaths
+    [switch]$KeepPaths,
+    [switch]$Sample,
+    [int]$SampleEverySeconds = 10,
+    [switch]$Attach
 )
 $ErrorActionPreference = 'Stop'
+if ($Attach -and $Launch) { throw '-Attach watches an app that is already running; leave out -Launch.' }
+if ($Sample -and $SampleEverySeconds -lt 1) { throw '-SampleEverySeconds must be at least 1.' }
 
 Add-Type -TypeDefinition @'
 using System; using System.Collections.Concurrent; using System.Collections.Generic; using System.IO;
@@ -258,8 +308,9 @@ function Hide([string]$s) {
     $s
 }
 # Credential-like values in command lines become <redacted>; switch and parameter names stay.
-# The same rule is in inventory.ps1 and elevated_readonly.ps1.
-$SecretName = '[\w.-]*?(?:token|stoken|bduss|session|password|passwd|secret|cookie|auth)[\w.-]*'
+# inventory.ps1 and elevated_readonly.ps1 carry the same rule; keep the three in step. A sid name must be
+# the whole name or follow a separator (sid=, --sid, x_sid), so names such as "inside" or "consider" stay.
+$SecretName = '(?:[\w.-]*?(?:token|stoken|bduss|session|password|passwd|secret|cookie|auth)[\w.-]*|(?:[\w.-]*[_.-])?sid)'
 $StrongName = '[\w.-]*?(?:token|stoken|bduss|password|passwd|secret|cookie)[\w.-]*'
 $SecretRx = @(
     # -name value, --name=value, /name:value. After a token, bduss, password, secret or cookie switch the next
@@ -354,7 +405,19 @@ $tracked = @{}      # pid -> @{ created; name; path; reason; parent; alive; deta
 $seen = @{}         # pid|creation -> $true (every process already considered)
 $live = @{}         # pid -> creation time, from the current poll
 $traceParents = @{} # pid -> parent pid, from Win32_ProcessStartTrace (elevated only)
-function Get-Procs { @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, CreationDate -ErrorAction SilentlyContinue) }
+$procProps = @('ProcessId', 'ParentProcessId', 'Name', 'ExecutablePath', 'CommandLine', 'CreationDate')
+if ($Sample) { $procProps += 'KernelModeTime', 'UserModeTime', 'WorkingSetSize', 'PrivatePageCount', 'ReadOperationCount', 'WriteOperationCount',
+    'OtherOperationCount', 'ReadTransferCount', 'WriteTransferCount', 'OtherTransferCount' }
+$lastProcs = @()    # the latest poll, which -Sample reads
+function Get-Procs { @(Get-CimInstance Win32_Process -Property $procProps -ErrorAction SilentlyContinue) }
+# remote_debugging for a command line that opens a browser debugging endpoint, or $null.
+function Get-DebugFlag([string]$c) {
+    if (-not $c) { return $null }
+    $m = [regex]::Match($c, '--remote-debugging-port[=\s]+(\d+)', 'IgnoreCase')
+    if ($m.Success) { return "port=$($m.Groups[1].Value)" }
+    if ($c -match '(?i)--remote-debugging-pipe') { return 'pipe' }
+    $null
+}
 function Mark-Exit([int]$id, [string]$why) {
     $t = $tracked[$id]; $t.alive = $false
     $f = [ordered]@{ pid = $id; name = $t.name; lifetime_s = $(if ($null -ne $t.created) { [math]::Round(((Get-Date) - $t.created).TotalSeconds, 1) } else { $null }) }
@@ -383,7 +446,9 @@ function Consider($p, [bool]$initial, [string]$forceReason) {
             if (-not $prev.detail) {
                 if ($null -eq $prev.created) { $prev.created = $created }
                 $prev.path = $p.ExecutablePath; $prev.detail = $true
-                Emit 'proc_detail' ([ordered]@{ pid = $id; name = $p.Name; path = $p.ExecutablePath; command_line = (Hide-Secret $p.CommandLine); created = (Format-Time $created) })
+                $f = [ordered]@{ pid = $id; name = $p.Name; path = $p.ExecutablePath; command_line = (Hide-Secret $p.CommandLine); created = (Format-Time $created) }
+                $dbg = Get-DebugFlag $p.CommandLine; if ($dbg) { $f.remote_debugging = $dbg }
+                Emit 'proc_detail' $f
             }
             return
         }
@@ -405,6 +470,7 @@ function Consider($p, [bool]$initial, [string]$forceReason) {
     $f = [ordered]@{ pid = $id; ppid = [int]$p.ParentProcessId; parent = $null; parent_reason = $null; name = $p.Name
         path = $path; command_line = (Hide-Secret $p.CommandLine); reason = $reason; created = (Format-Time $created) }
     if ($par) { $f.parent = $par.name; $f.parent_reason = $par.reason }
+    $dbg = Get-DebugFlag $p.CommandLine; if ($dbg) { $f.remote_debugging = $dbg }
     if ($svcs.Count) {
         $f.service = (@($svcs | ForEach-Object { $_.name }) -join ', ')
         $f.service_image = (@($svcs | ForEach-Object { $_.image } | Select-Object -Unique) -join '; ')
@@ -415,6 +481,7 @@ function Consider($p, [bool]$initial, [string]$forceReason) {
 }
 function Poll-Procs([bool]$initial) {
     $all = Get-Procs
+    $script:lastProcs = $all; $script:lastPollT = $t0.Elapsed.TotalSeconds; $script:lastPollWall = Get-Date
     Update-Services
     $live.Clear(); foreach ($p in $all) { $live[[int]$p.ProcessId] = $p.CreationDate }
     # parents before children, so a whole new chain is caught in one poll
@@ -474,30 +541,44 @@ function Drain-Trace {
         $ok = [bool]($ci -and ($ci.Path -or $ci.CommandLine))
         $tracked[$cid] = @{ created = $cc; name = $ni.ProcessName; path = $(if ($ci) { $ci.Path } else { $null }); reason = 'child-trace'; parent = $ppid; alive = $true; detail = $ok; recorded = Get-Date }
         if ($ok -and $null -ne $cc) { $seen["$cid|$cc"] = $true }
-        Emit 'proc_start' ([ordered]@{ pid = $cid; ppid = $ppid; parent = $par.name; parent_reason = $par.reason; name = $ni.ProcessName
+        $f = [ordered]@{ pid = $cid; ppid = $ppid; parent = $par.name; parent_reason = $par.reason; name = $ni.ProcessName
             path = $(if ($ci) { $ci.Path } else { $null }); command_line = $(if ($ci -and $null -ne $ci.CommandLine) { Hide-Secret $ci.CommandLine } else { $null }); reason = 'child-trace'; created = (Format-Time $cc)
-            detail = $(if ($ok) { 'read at start' } else { 'not readable at start (exited or denied)' }) })
+            detail = $(if ($ok) { 'read at start' } else { 'not readable at start (exited or denied)' }) }
+        $dbg = Get-DebugFlag $(if ($ci) { $ci.CommandLine } else { $null }); if ($dbg) { $f.remote_debugging = $dbg }
+        Emit 'proc_start' $f
     }
 }
 
 # ---------------------------------------------------------------- connections
 $connSeen = @{}
+# Who can reach a bound address: loopback, all interfaces, or one interface address.
+function Get-ListenScope([string]$a) {
+    if ($a -eq '0.0.0.0' -or $a -eq '::') { return 'all' }
+    if ($a -eq '::1' -or $a.StartsWith('127.')) { return 'loopback' }
+    'specific'
+}
 function Poll-Conns {
     $ids = @($tracked.Keys | Where-Object { $tracked[$_].alive })
     if (-not $ids) { return }
     $set = @{}; foreach ($i in $ids) { $set[[int]$i] = $true }
-    foreach ($c in @(Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+    # Kept for Take-Sample: Get-NetTCPConnection can take more than a second on a busy machine.
+    $script:lastTcp = @(Get-NetTCPConnection -ErrorAction SilentlyContinue); $script:lastUdp = @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue)
+    $script:lastConnT = $t0.Elapsed.TotalSeconds
+    foreach ($c in $script:lastTcp) {
         $op = [int]$c.OwningProcess; if (-not $set.ContainsKey($op)) { continue }
         $k = "tcp|$op|$($c.LocalAddress):$($c.LocalPort)|$($c.RemoteAddress):$($c.RemotePort)|$($c.State)"
         if ($connSeen.ContainsKey($k)) { continue }; $connSeen[$k] = $true
-        Emit 'conn' ([ordered]@{ proto = 'tcp'; pid = $op; process = $tracked[$op].name; state = $c.State.ToString()
-            local = "$($c.LocalAddress):$($c.LocalPort)"; remote = "$($c.RemoteAddress):$($c.RemotePort)" })
+        $f = [ordered]@{ proto = 'tcp'; pid = $op; process = $tracked[$op].name; state = $c.State.ToString()
+            local = "$($c.LocalAddress):$($c.LocalPort)"; remote = "$($c.RemoteAddress):$($c.RemotePort)" }
+        if ($f.state -eq 'Listen') { $f.listen_scope = Get-ListenScope "$($c.LocalAddress)" }
+        Emit 'conn' $f
     }
-    foreach ($u in @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue)) {
+    foreach ($u in $script:lastUdp) {
         $op = [int]$u.OwningProcess; if (-not $set.ContainsKey($op)) { continue }
         $k = "udp|$op|$($u.LocalAddress):$($u.LocalPort)"
         if ($connSeen.ContainsKey($k)) { continue }; $connSeen[$k] = $true
-        Emit 'conn' ([ordered]@{ proto = 'udp'; pid = $op; process = $tracked[$op].name; local = "$($u.LocalAddress):$($u.LocalPort)" })
+        Emit 'conn' ([ordered]@{ proto = 'udp'; pid = $op; process = $tracked[$op].name; local = "$($u.LocalAddress):$($u.LocalPort)"
+            listen_scope = (Get-ListenScope "$($u.LocalAddress)") })
     }
 }
 # Established TCP connections per tracked process and in total: one count over time per line.
@@ -515,12 +596,112 @@ function Count-Conns {
     $script:countLines++
 }
 
+# ---------------------------------------------------------------- resource samples (-Sample)
+$nCpu = [Environment]::ProcessorCount
+$sampPrev = @{}             # pid -> @{ created; cpu; io } at the previous sample
+$sampAgg = [ordered]@{}     # pid|created -> totals over the window
+$sampleLines = 0; $sampleAt = $null; $sampleWall = $null; $firstSampleAt = $null; $peakWs = 0.0; $peakPriv = 0.0
+$lastPollT = $null; $lastPollWall = $null; $lastTcp = @(); $lastUdp = @(); $lastConnT = $null
+$ioNames = @('read_ops', 'write_ops', 'other_ops', 'read_bytes', 'write_bytes', 'other_bytes')
+$ioProps = @('ReadOperationCount', 'WriteOperationCount', 'OtherOperationCount', 'ReadTransferCount', 'WriteTransferCount', 'OtherTransferCount')
+# One sample line from the latest poll: per tracked running process CPU, memory, I/O deltas and socket counts.
+# Times are those of that poll (poll_t), not of the line, so the deltas divide by the real interval.
+function Take-Sample {
+    $now = $script:lastPollT; $wall = $script:lastPollWall
+    if ($null -eq $now) { return }
+    $dt = $(if ($null -ne $script:sampleAt) { $now - $script:sampleAt } else { $null })
+    if ($null -ne $dt -and $dt -le 0) { return }   # no new poll since the last sample
+    $byPid = @{}; foreach ($p in $script:lastProcs) { $byPid[[int]$p.ProcessId] = $p }
+    $ids = @(foreach ($k in @($tracked.Keys | Sort-Object)) { if ($tracked[$k].alive -and $byPid.ContainsKey([int]$k)) { [int]$k } })
+    $set = @{}; foreach ($i in $ids) { $set[$i] = $true }
+    $est = @{}; $lis = @{}; $udp = @{}
+    if ($ids.Count) {
+        # The socket lists of the last connection poll when it is recent, else a fresh read.
+        if ($null -eq $script:lastConnT -or $t0.Elapsed.TotalSeconds - $script:lastConnT -gt 5) {
+            $script:lastTcp = @(Get-NetTCPConnection -ErrorAction SilentlyContinue); $script:lastUdp = @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue)
+            $script:lastConnT = $t0.Elapsed.TotalSeconds
+        }
+        foreach ($c in $script:lastTcp) {
+            $op = [int]$c.OwningProcess; if (-not $set.ContainsKey($op)) { continue }
+            if ($c.State -eq 'Established') { $est[$op] = 1 + [int]$est[$op] } elseif ($c.State -eq 'Listen') { $lis[$op] = 1 + [int]$lis[$op] }
+        }
+        foreach ($u in $script:lastUdp) { $op = [int]$u.OwningProcess; if ($set.ContainsKey($op)) { $udp[$op] = 1 + [int]$udp[$op] } }
+    }
+    $tot = [ordered]@{ processes = 0; cpu_d_s = 0.0; cpu_pct = $null; ws_mb = 0.0; priv_mb = 0.0 }
+    foreach ($n in $ioNames) { $tot[$n] = [int64]0 }
+    $tot.tcp_est = 0; $tot.tcp_listen = 0; $tot.udp = 0
+    $rows = New-Object System.Collections.Generic.List[object]
+    $next = @{}
+    foreach ($id in $ids) {
+        $t = $tracked[$id]; $p = $byPid[$id]
+        if ($null -ne $t.created -and $null -ne $p.CreationDate -and $p.CreationDate -ne $t.created) { continue }   # PID reused since
+        $cpu = ([double]$p.KernelModeTime + [double]$p.UserModeTime) / 1e7
+        $io = @(foreach ($n in $ioProps) { [double]$p.$n })
+        $next[$id] = @{ created = $p.CreationDate; cpu = $cpu; io = $io }
+        $prev = $sampPrev[$id]; $since = 'none'; $base = $null; $span = $null
+        if ($prev -and $prev.created -eq $p.CreationDate) { $since = 'prev'; $base = $prev; $span = $dt }
+        elseif ($null -ne $script:sampleWall -and $null -ne $p.CreationDate -and $p.CreationDate -gt $script:sampleWall) {
+            $since = 'start'; $base = @{ cpu = 0.0; io = @(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }; $span = ($wall - $p.CreationDate).TotalSeconds
+        }
+        $ws = [math]::Round([double]$p.WorkingSetSize / 1MB, 1); $pv = [math]::Round([double]$p.PrivatePageCount / 1MB, 1)
+        $r = [ordered]@{ pid = $id; name = $t.name; since = $since; cpu_s = [math]::Round($cpu, 2); cpu_d_s = $null; cpu_pct = $null; ws_mb = $ws; priv_mb = $pv }
+        foreach ($n in $ioNames) { $r[$n] = $null }
+        $r.tcp_est = [int]$est[$id]; $r.tcp_listen = [int]$lis[$id]; $r.udp = [int]$udp[$id]
+        $ak = "$id|$($p.CreationDate)"; $a = $sampAgg[$ak]
+        if (-not $a) {
+            $a = [ordered]@{ pid = $id; name = $t.name; created = (Format-Time $p.CreationDate); samples = 0; span_s = 0.0; cpu_s = 0.0; cpu_pct_avg = $null; peak_ws_mb = 0.0; peak_priv_mb = 0.0 }
+            foreach ($n in $ioNames) { $a[$n] = [int64]0 }
+            $sampAgg[$ak] = $a
+        }
+        $a.samples++
+        if ($ws -gt $a.peak_ws_mb) { $a.peak_ws_mb = $ws }; if ($pv -gt $a.peak_priv_mb) { $a.peak_priv_mb = $pv }
+        if ($base) {
+            $d = [math]::Max(0.0, $cpu - $base.cpu)
+            $r.cpu_d_s = [math]::Round($d, 2); $tot.cpu_d_s += $d; $a.cpu_s += $d
+            if ($span -gt 0) { $r.cpu_pct = [math]::Round(100 * $d / $span / $nCpu, 2); $a.span_s += $span }
+            for ($i = 0; $i -lt $ioNames.Count; $i++) {
+                $v = [int64][math]::Max(0.0, $io[$i] - $base.io[$i]); $r[$ioNames[$i]] = $v; $tot[$ioNames[$i]] += $v; $a[$ioNames[$i]] += $v
+            }
+        }
+        $tot.processes++; $tot.ws_mb += $ws; $tot.priv_mb += $pv; $tot.tcp_est += $r.tcp_est; $tot.tcp_listen += $r.tcp_listen; $tot.udp += $r.udp
+        $rows.Add($r)
+    }
+    $script:sampPrev = $next
+    if ($dt -gt 0) { $tot.cpu_pct = [math]::Round(100 * $tot.cpu_d_s / $dt / $nCpu, 2) }
+    $tot.cpu_d_s = [math]::Round($tot.cpu_d_s, 2); $tot.ws_mb = [math]::Round($tot.ws_mb, 1); $tot.priv_mb = [math]::Round($tot.priv_mb, 1)
+    if ($tot.ws_mb -gt $script:peakWs) { $script:peakWs = $tot.ws_mb }; if ($tot.priv_mb -gt $script:peakPriv) { $script:peakPriv = $tot.priv_mb }
+    # ToArray, not @(): Windows PowerShell 5.1 fails on @(<generic List>) inside a hashtable literal.
+    Emit 'sample' ([ordered]@{ poll_t = [math]::Round($now, 2); interval_s = $(if ($null -ne $dt) { [math]::Round($dt, 2) } else { $null }); n_cpu = $nCpu; total = $tot; procs = $rows.ToArray() })
+    if ($null -eq $script:firstSampleAt) { $script:firstSampleAt = $now }
+    $script:sampleAt = $now; $script:sampleWall = $wall; $script:sampleLines++
+}
+function Write-SampleSummary {
+    $win = $(if ($null -ne $script:firstSampleAt) { $script:sampleAt - $script:firstSampleAt } else { 0.0 })
+    $tot = [ordered]@{ processes = $sampAgg.Count; cpu_s = 0.0; cpu_pct_avg = $null; peak_ws_mb = $script:peakWs; peak_priv_mb = $script:peakPriv }
+    foreach ($n in $ioNames) { $tot[$n] = [int64]0 }
+    $rows = @(foreach ($a in @($sampAgg.Values)) {
+        $tot.cpu_s += $a.cpu_s; foreach ($n in $ioNames) { $tot[$n] += $a[$n] }
+        if ($a.span_s -gt 0) { $a.cpu_pct_avg = [math]::Round(100 * $a.cpu_s / $a.span_s / $nCpu, 2) }
+        $a.cpu_s = [math]::Round($a.cpu_s, 2); $a.span_s = [math]::Round($a.span_s, 1)
+        $a
+    }) | Sort-Object { - $_.cpu_s }
+    if ($win -gt 0) { $tot.cpu_pct_avg = [math]::Round(100 * $tot.cpu_s / $win / $nCpu, 2) }
+    $tot.cpu_s = [math]::Round($tot.cpu_s, 2)
+    Emit 'sample_summary' ([ordered]@{ samples = $script:sampleLines; every_s = $SampleEverySeconds; window_s = [math]::Round($win, 1); n_cpu = $nCpu; total = $tot; procs = @($rows) })
+}
+
 # ---------------------------------------------------------------- run
 $fileCount = 0; $launched = $null; $alive = @()
 try {
-    Emit 'start' ([ordered]@{ roots = $roots; watched = $watched; launch = $Launch; seconds = $Seconds; poll_ms = $PollMs
-        elevated = $IsAdmin; start_trace = [bool]$traceSub; watch_names = $WatchNames; conn_count_every_s = $ConnCountEverySeconds })
+    Emit 'start' ([ordered]@{ roots = $roots; watched = $watched; launch = $Launch; attach = [bool]$Attach; seconds = $Seconds; poll_ms = $PollMs
+        elevated = $IsAdmin; start_trace = [bool]$traceSub; watch_names = $WatchNames; conn_count_every_s = $ConnCountEverySeconds
+        sample_every_s = $(if ($Sample) { $SampleEverySeconds } else { $null }) })
     Poll-Procs $true
+    if ($Attach -and -not @($tracked.Keys | Where-Object { $tracked[$_].alive }).Count) {
+        $why = '-Attach: no process of the app is running (none under the roots, none running a service binary under them, no -WatchNames match)'
+        Emit 'note' ([ordered]@{ text = $why })
+        throw $why
+    }
     if ($Launch) {
         $lp = Norm $Launch
         if (-not (Test-UnderRoot $lp)) { Emit 'note' ([ordered]@{ text = "launch target is not under any -Root; it and its children are tracked through the launch PID only" }) }
@@ -534,7 +715,7 @@ try {
         Consider ([pscustomobject]@{ ProcessId = $launched.Id; ParentProcessId = $PID; Name = [IO.Path]::GetFileName($lp)
             ExecutablePath = $(if ($li -and $li.Path) { $li.Path } else { $lp }); CommandLine = $(if ($li) { $li.CommandLine } else { $null }); CreationDate = $lc }) $false 'launched'
     }
-    $nextConn = 0.0; $nextCount = [double]$ConnCountEverySeconds
+    $nextConn = 0.0; $nextCount = [double]$ConnCountEverySeconds; $nextSample = 0.0
     while ($t0.Elapsed.TotalSeconds -lt $Seconds) {
         Drain-Trace
         Poll-Procs $false
@@ -553,14 +734,22 @@ try {
             Count-Conns
             while ($nextCount -le $t0.Elapsed.TotalSeconds) { $nextCount += $ConnCountEverySeconds }   # on the grid, never twice in a row
         }
+        if ($Sample -and $lastPollT -ge $nextSample) {   # on the grid of poll times, which the deltas use
+            Take-Sample
+            while ($nextSample -le $lastPollT) { $nextSample += $SampleEverySeconds }
+        }
         Start-Sleep -Milliseconds $PollMs
     }
+    # A last sample at the end of the window, so the summary covers all of it.
+    if ($Sample -and $null -ne $sampleAt -and $t0.Elapsed.TotalSeconds - $sampleAt -ge 1) { Poll-Procs $false; Take-Sample }
 } finally {
     $tap.Dispose()
     if ($traceSub) { Unregister-Event -SourceIdentifier $traceSub -ErrorAction SilentlyContinue; Get-Event -SourceIdentifier $traceSub -ErrorAction SilentlyContinue | Remove-Event }
+    if ($Sample -and $sampleLines) { try { Write-SampleSummary } catch { Write-Warning "sample summary failed: $($_.Exception.Message)" } }
     $alive = @($tracked.Keys | Where-Object { $tracked[$_].alive })
-    Emit 'end' ([ordered]@{ tracked = $tracked.Count; still_running = $alive.Count; file_events = $fileCount; connections = $connSeen.Count; conn_counts = $countLines })
+    Emit 'end' ([ordered]@{ tracked = $tracked.Count; still_running = $alive.Count; file_events = $fileCount; connections = $connSeen.Count; conn_counts = $countLines
+        samples = $(if ($Sample) { $sampleLines } else { $null }) })
     $writer.Dispose()
 }
-Write-Host ("tracked processes: {0} ({1} still running), file events: {2}, endpoints: {3}, connection counts: {4}" -f $tracked.Count, $alive.Count, $fileCount, $connSeen.Count, $countLines)
+Write-Host ("tracked processes: {0} ({1} still running), file events: {2}, endpoints: {3}, connection counts: {4}{5}" -f $tracked.Count, $alive.Count, $fileCount, $connSeen.Count, $countLines, $(if ($Sample) { ", samples: $sampleLines" } else { '' }))
 Write-Host "out: $outPath"

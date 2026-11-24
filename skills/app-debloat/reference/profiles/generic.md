@@ -73,6 +73,9 @@ Checklist for an unknown app:
 - **Persistence**: `autorunsc` diff before and after install and after a day of use; include services with recovery actions, tasks (including those registered under a GUID name), Run keys in both views, Shell extensions, protocol handlers, file associations, IFEO keys the vendor wrote itself, WMI subscriptions.
 - **Re-install vectors**: own updater exe, a "repair" or "diagnose" exe, a SYSTEM service that writes the install dir, a per-user install under `%APPDATA%` that needs no admin to rewrite, MSIX/Store wrapper, scheduled "check" task, the main exe downloading a full installer on start.
 - **Gates**: look for plain ini/json/yml next to the exe first, then registry under `HKCU\Software\<Vendor>`, then resource archives (zip skins, pak, asar), then encrypted blobs (high entropy, base64, fixed header).
+- **Installer verbs**: the main exe often asks its own installer to plant things on request: a right-click entry, a default-reader takeover, Office add-ins, a browser plugin, an autostart value, shortcut AppUserModelIDs. List the verbs (`scripts/strscan.py --set verbs` on the installer and the main exe; `whole` hits are the likely verbs), map each to the keys it writes (`pe_triage.py --grep <verb>` for the call site, or one capture), and note which in-app switch fires it. That table is the fastest map of what a "core" installer can do.
+- **Environment switches**: vendor `<PREFIX>_DISABLE_*` names read by the main exe (`strscan.py --set env`) can turn off an auto-update, a crash reporter or a login popup. Lever: `reg-set` on `HKCU\Environment`, read at the next logon, after one probe that shows the effect. Never set one that disables a signature or integrity check.
+- **Cross-app sweep**: `pipeline.md` P1 steps 5 and 6 (browser hosts and extensions, Office add-ins, Explorer namespace and overlays, defaults, listeners, P2P), even when nothing in the UI hints at them.
 - **Core contract**: one sentence per core feature and one probe per sentence before any change.
 - **Ban risk**: does any core feature need a server account? If yes, ask the owner for explicit consent for this app and default to out-of-process only until the integrity probe says otherwise.
 
@@ -97,6 +100,10 @@ Notes from one run on a Youdao Dictionary desktop build; unverified for other ve
 - Ads and AI prompts are drawn in-process from server config; see the next section.
 - The client's own diagnostic log (Youdao: `Yodao\DeskDict\logs\diagnostic\diagnostic.log` under the per-user data dir, JSON lines with a `level` field) is the best P6 evidence that blocked parts cause no errors (`pipeline-field-notes.md`). Summarize it; do not copy it into DATA.
 - Lookup, OCR and document translation need typed input. Under a no-input rule they go to the owner's after-reboot list.
+- Its intrusions were capability-style: the main exe asks its installer (verbs above) to add a right-click entry on every file and folder, take the PDF default "with tamper protection", register Office add-ins and install a browser extension through the browser's external-extension keys. All were off in that run, each behind a plain key in the per-user `config.ini`. Those keys are the levers (`ini-set` with `onlyWhenNotRunning`, since the main exe rewrites the file from memory at start and exit; list the file in `core.preserve`). Off and anchored, such an action does nothing until something flips the key; set `reapply`.
+- Native messaging hosts were registered for Chrome (HKCU) and Edge (HKLM, 32-bit view) although the install is per-user; the HKLM one needs an elevated `-Apply` and `view: 32` (`levers.md`, Native Messaging Host).
+- An input assistant that watches and types into other apps, a clipboard watcher and a desktop floating ball each had their own plain key; word grab injects hook DLLs only while it is on (`pipeline.md` P1 step 8).
+- The embedded browser's debugging port sat behind a server whitelist (`electron-cef-app.md`, Gates).
 
 ## Remote Config Popups
 

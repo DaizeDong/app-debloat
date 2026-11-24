@@ -173,11 +173,13 @@ exists, and CONFLICT (left untouched) for anything else.
 | `dir-placeholder-file` | `target[]`, `checkLoaded` (default true), `stopHosts[]`, `createIfMissing`, `backup` | stops the `stopHosts` processes by full path, re-checks loaded modules, copies the folder to `backup\` (file count checked), replaces it with an empty read-only file; deferred with WARN while any module under the folder is loaded or the check is incomplete (see Loaded-Module Check). Set `backup: false` for very large folders. A placeholder deleted since it was placed is re-created (see Placeholders That Disappear) | if the file is still empty: removes it and restores the folder from the backup, else lists it for reinstall |
 | `acl-deny-write` | `target[]`, `principal` (`CurrentUser`, `Users`, SID), `rights` (`write` default, or `write+protect`), `emptyFirst`, `createIfMissing` | adds exactly the missing deny rights for that SID (inherited by children on folders) and records them: `write` is WriteData, AppendData, WriteEA, WriteAttributes; `write+protect` adds Delete, DeleteSubdirectoriesAndFiles, ChangePermissions and TakeOwnership, and is refused unless the target's owner is Administrators (see acl-deny-write and Placeholders) | takes away exactly the rights the tool added (all journal lines of the key together) from that SID's entry with the same inheritance; other deny entries and rights stay; removes a folder it created |
 | `ifeo-block` | `target[]` bare exe names | IFEO `Debugger` = `%SystemRoot%\System32\AppDebloat-blocked\<id>.exe` (never exists) | deletes only its own Debugger value, the key only if it created it |
-| `reg-set` | `target` key, `name`+`value` or `values{}`, `kind` (DWord, QWord, String, ExpandString, MultiString), `view` | sets values, records the old ones | restores or deletes each value |
-| `reg-delete-key` | `target[]`, optional `match` regex over subkeys, `view` | `reg export` to the state folder, then deletes; TrustedInstaller-owned keys are a WARN, not a FAIL (a known failure when `knownFailure` covers the key) | `reg import`, unless the key exists again (CONFLICT) |
+| `reg-set` | `target` key, `name`+`value` or `values{}`, `kind` (DWord, QWord, String, ExpandString, MultiString, Binary), `view` | sets values, records the old ones (kind and data). A value counts as already set only when its kind and data both match. `Binary` takes a hex byte string (see Registry Values and Browser Policy) | restores or deletes each value, only while it still holds the kind and data the tool wrote |
+| `reg-delete-key` | `target[]`, optional `match` regex over subkey names, optional `matchDefault` regex over each subkey's default value, `view` | `reg export` to the state folder, then deletes; TrustedInstaller-owned keys are a WARN, not a FAIL (a known failure when `knownFailure` covers the key). With `match` and `matchDefault` a subkey must pass both; a search that finds nothing prints a SKIP line | `reg import`, unless the key exists again (CONFLICT) |
+| `reg-delete-value` | `target` key or `target[]` keys (`*` and `?` allowed per segment), exactly one of `names[]` (exact, case-insensitive) or `match` (regex over value names), `view` | journals each value's kind and data, then deletes only that value; the rest of the key stays. Refused values are listed under Safety Rules; under a Run key only a value whose program lies under the install root or an `allowedRoots` entry is deleted | re-creates the value with its first original kind and data only while it is absent (SKIP when the original is back, CONFLICT when it holds anything else, GONE when the key is gone) |
+| `browser-ext-block` | `ids[]` (extension ids, each once), `browsers[]` (`chrome`, `edge`; default both), `removeExternal` | adds each id to the browser's `ExtensionInstallBlocklist` list in force (the machine policy, or the user policy when only that one has entries) under the lowest free value number; an id that list already holds is a SKIP. Every plan prints that the browsers show "Managed by your organization" while a policy value is set. `removeExternal` also deletes `Extensions\<id>` (HKLM both views, HKCU) like `reg-delete-key` | deletes only the value it wrote, while it still holds the id (else CONFLICT), then the keys it created, while empty |
 | `shellext-block` | `clsids[]`, `handlerMatch`, `handlerParents[]`, `removeClsid`, `label` | `Shell Extensions\Blocked` values, deletes the CLSID keys and matching ContextMenuHandlers (HKLM and HKCU, 64-bit and WOW6432Node). A handler key whose name or default value is the CLSID with a trailing `-` (the vendor's own off switch) counts as the same CLSID | removes Blocked values, imports deleted keys |
 | `toast-off` | `target[]` AppUserModelIDs (wildcards match existing) | `Notifications\Settings\<id>` `Enabled=0` | restores |
-| `firewall-block-program` | `target[]` program paths, `direction` | rule `AppDebloat <id> <action> <exe> <hash>` in group `AppDebloat-<id>`. When a target program is gone but its rule still exists (a literal target, or a journaled program a glob target still names), the SKIP line says `rule <name> still present; -Uninstall removes it, or drop the target and rebuild`; the rule is never removed by a plan | removes that rule only if its group and program are still the recorded ones |
+| `firewall-block-program` | `target[]` program paths, `direction` (`Outbound` default, or `Inbound`) | rule `AppDebloat <id> <action> <exe> <hash>` in group `AppDebloat-<id>`. `Inbound` blocks a listener (a P2P or upload engine) while the program keeps its own outbound connections; a block rule wins over the vendor's allow rules, and loopback traffic is not filtered. The direction is journaled; when a rebuilt manifest changes it, the plan replaces the tool's own rule (its group) and prints a WARN for a same-named rule in another group, which is left as is. When a target program is gone but its rule still exists (a literal target, or a journaled program a glob target still names), the SKIP line says `rule <name> still present; -Uninstall removes it, or drop the target and rebuild`; the rule is never removed by a plan | removes that rule only if its group, program and (when journaled) direction are still the recorded ones |
 | `hosts-block` | `target[]` domains, `acknowledgeFlagging` | discouraged, always printed as WARN; skipped unless acknowledged; refuses Microsoft domains | removes exactly the lines it added; the rest of the file is kept byte for byte |
 | `preboot-file-edit` | `target[]` INI glob, `section`, `set{}`, `dropFromSections[]` | for settings the app keeps in shared memory and flushes back on exit: registers a one-shot SYSTEM startup task that edits the file before logon and deletes itself after success | cancels a pending edit (if the task still runs the recorded script), or schedules a restore before next logon for each file whose values are still exactly the written ones |
 | `ini-set` | `path` (tokens, globs), `section`, `key`, `value` (string or number; `null` removes the key), `encoding`, `onlyWhenNotRunning[]` | for an INI the app reads at start: sets (or adds, or removes) one key, via a temp file and `Replace`; journals the original value and whether the section existed. Deferred with WARN while an `onlyWhenNotRunning` exe runs | only while the key still has the written value: puts the original back (or removes the key, and the section if the tool created it) |
@@ -294,6 +296,76 @@ edited from outside; `json-set` does not recompute MACs, so P6 must re-read the 
 whose path cannot be read, defers the action with a WARN at plan time and again right before the write; `-Uninstall`
 reports the same as a WARN (journal kept). The engine never stops these processes itself.
 
+## Registry Values and Browser Policy
+
+**reg-delete-value.** Use it where `reg-delete-key` would take other apps' entries along: a vendor's value in a
+shared `Run` key, a ProgID in `OpenWithProgids`, a `Capabilities\FileAssociations` entry. Each matching value is one
+item, journaled with its kind and data before it is deleted. Plan, journal `desc`, logs and undo messages show only
+the kind and size (`String, 84 chars`, `Binary, 12 bytes`; a DWord or QWord number), never the data, since a Run
+command line can carry a token; the data itself is kept only in `original`. `match` is a regex over value names, `names` lists exact
+names, and a target segment may hold `*` and `?`, so one action covers every file type:
+
+```json
+{ "id": "run-widget", "type": "reg-delete-value", "category": "promo", "rationale": ["L-P3"], "evidence": "observed",
+  "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "names": ["ContosoWidget"], "reapply": true },
+{ "id": "open-with", "type": "reg-delete-value", "category": "promo", "rationale": ["L-P5"], "evidence": "observed",
+  "target": ["HKCU\\Software\\Classes\\.*\\OpenWithProgids"], "match": "^ContosoApp\\." }
+```
+
+A vendor that writes its value back at every start is answered with `reapply`: the watch task deletes it again. The
+journal keeps the first original, so `-Uninstall` re-creates the value as it was first found, not as the vendor last
+wrote it. A search that finds nothing prints one SKIP line per target with the number of keys searched.
+
+**Run keys.** Under `...\CurrentVersion\Run`, `RunOnce`, `RunServices`, `RunServicesOnce` and the same names under
+`Policies\Explorer` (any view), a value is deleted only when it starts a program under the install root or an
+`allowedRoots` entry: the quoted path, or the text up to the first `.exe`, environment variables expanded, compared as
+written and as its real path. A value that starts another program, or names no full program path (`rundll32.exe
+"...",Entry`), fails the action at plan time with `refused value <key> <name>: ...`, so a broad `match` cannot remove
+another app's autostart. `StartupApproved\Run` is not a Run key; its values are flags.
+
+**Binary data.** `reg-set` with `"kind": "Binary"` takes the data as a hex byte string; spaces, commas, dashes and a
+`hex:` prefix are ignored (`"03 00 00 00 00 00 00 00 00 00 00 00"`). Binary and `REG_NONE` data are journaled,
+compared and printed as lowercase hex. The Windows startup switch is the usual use: `03` in the first byte means
+disabled, `02` enabled, and an app that rewrites its own Run value cannot undo it:
+
+```json
+{ "id": "autostart-off", "type": "reg-set", "category": "promo", "rationale": ["L-P4"], "evidence": "observed",
+  "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run", "kind": "Binary",
+  "values": { "ContosoApp": "03 00 00 00 00 00 00 00 00 00 00 00" }, "reapply": true }
+```
+
+**reg-delete-key with matchDefault.** Overlay identifiers and similar entries carry generic names
+(`      .WorkspaceExt0`, with leading spaces), so a name regex is fragile. `matchDefault` selects subkeys by their
+default value as stored (environment variables not expanded): a CLSID for an overlay, the manifest path for a
+native messaging host. It may be combined with `match`; neither may match an empty string. Overlay changes take
+effect after Explorer restarts, which the engine does not do. Write one action per view when both views hold entries.
+
+```json
+{ "id": "overlays", "type": "reg-delete-key", "category": "promo", "rationale": ["L-P6"], "evidence": "observed",
+  "target": ["HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers"],
+  "matchDefault": "^\\{CAFE000[0-6]-1111-4222-8333-444455556666\\}$", "reapply": true }
+```
+
+**browser-ext-block.** Blocks extension ids by browser policy (the `ExtensionInstallBlocklist` list in force, HKLM or HKCU), whichever way the vendor installs them (Web Store,
+the external-extension registry keys, a profile entry written from outside); an installed extension whose id is
+blocked is disabled. Ids are 32 letters `a` to `p`, each listed once. Chrome reads `SOFTWARE\Policies\Google\Chrome\ExtensionInstallBlocklist`, Edge
+`SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallBlocklist`, under HKLM (machine) and HKCU (user); each entry is a
+string value named `1`, `2`, ... The browser does not merge the two lists: when HKLM has entries, the HKCU list is
+ignored. So the engine writes into the list in force, HKCU when only HKCU has entries (a new HKLM list would switch
+the owner's HKCU entries off), else HKLM; when both have entries, it prints a WARN naming the ids held only in HKCU,
+which are not blocked. Each id goes under the lowest number no value of that list uses, so the owner's own policy
+entries are never overwritten, and an id that list already holds is a SKIP. Right before the write it checks that the number is
+still free, and defers with a WARN (nothing journaled) when it is not. While any policy value exists the browser
+shows "Managed by your organization"; every plan prints that as an INFO line, so write it into the option's help.
+`-Uninstall` removes only the value the tool wrote while it still holds the id, then each key the tool created
+(recorded as `created` in the journal), deepest first, while it is empty.
+
+```json
+{ "id": "browser-ext", "type": "browser-ext-block", "category": "promo", "rationale": ["L-P7"], "evidence": "observed",
+  "when": "BlockExtension", "ids": ["fdpaonmkbhcjgeilfdpaonmkbhcjgeil"], "browsers": ["chrome", "edge"],
+  "removeExternal": true, "reapply": true }
+```
+
 ## Known Failures
 
 An item that keeps failing for a reason that is understood and cannot be fixed (a security suite that vetoes one
@@ -315,8 +387,9 @@ so a new failure of another target stays a FAIL:
 
 Each `targets` entry names an item the way the action names its targets, with tokens expanded and `*` and `?`
 allowed (case-insensitive): a service name, `\Folder\TaskName`, a file or folder path (`{root}\updater_*.exe`), a
-bare exe name (`ifeo-block`), `HKCU\Key\ValueName` (`reg-set`, `shellext-block`, `toast-off`), `HKLM\Key` (deleted
-keys), a program path (`firewall-block-program`) or the hook's own item `Key`. A registry entry may spell the hive
+bare exe name (`ifeo-block`), `HKCU\Key\ValueName` (`reg-set`, `reg-delete-value`, `shellext-block`, `toast-off`),
+`HKLM\Key` (deleted keys, `removeExternal` included), `<browser>:<id>` (`browser-ext-block`, so `edge:*` covers every
+id in Edge), a program path (`firewall-block-program`) or the hook's own item `Key`. A registry entry may spell the hive
 any way an action target may (`HKEY_CURRENT_USER\`, `HKCU:\`) and may end in `\`: both sides are compared as
 `HKLM\...` or `HKCU\...` with no trailing backslash. `hosts-block` and `preboot-file-edit` plan one item per action
 and take only the whole-action form. A failure while the plan is built (before any item exists) is a known failure
@@ -343,12 +416,13 @@ compact; it names each action once with its count, and the full text stays in `a
 failure can be read without opening `auto.log`:
 
 ```
-2030-01-01T06:00:00 engine 1.5.0 fabrikam-drive 5.3.1|FabrikamDrive: 0 change(s), 0 failure(s), 1 known failure(s) [updater-svc x1, ref L-R2]
-2030-01-01T12:00:00 engine 1.5.0 fabrikam-drive 5.3.1|FabrikamDrive: 0 change(s), 1 failure(s), 0 known failure(s) FAIL: Pre-create placeholder directory (blocks re-download): C:\...\app-update.yml :: Access to the path 'app-update.yml' is denied.
+2030-01-01T06:00:00 engine 1.6.0 fabrikam-drive 5.3.1|FabrikamDrive: 0 change(s), 0 failure(s), 1 known failure(s) [updater-svc x1, ref L-R2]
+2030-01-01T12:00:00 engine 1.6.0 fabrikam-drive 5.3.1|FabrikamDrive: 0 change(s), 1 failure(s), 0 known failure(s) FAIL: Pre-create placeholder directory (blocks re-download): C:\...\app-update.yml :: Access to the path 'app-update.yml' is denied.
 ```
 
 A failing `sc.exe` is reported without throwing, so a handled failure leaves no `TerminatingError` in the `auto.log`
-transcript (PowerShell records every thrown error there, even a caught one). Record a knownFailure only after the
+transcript (PowerShell records every thrown error there, even a caught one). A failed `reg-delete-value` or
+`browser-ext-block` write is handed back the same way. Record a knownFailure only after the
 access-denied diagnostics (below) were read; never use it to hide a failure nobody explained.
 
 ## Access-Denied Diagnostics
@@ -361,7 +435,8 @@ or the PermissionDenied category), the engine prints a read-only diagnostic bloc
   without elevation). `The ScRegSetValueExW call failed for Start ... Access is denied`, logged in pairs at every
   attempt, means the denial hit the service's `Start` registry value, not the service's own permissions. The event
   names no service, so it is matched by time only;
-- registry (`reg-set`, `reg-delete-key`, `ifeo-block`, `shellext-block`): the key's owner and SDDL;
+- registry (`reg-set`, `reg-delete-key`, `reg-delete-value`, `browser-ext-block`, `ifeo-block`, `shellext-block`): the
+  key's owner and SDDL;
 - file or folder (placeholders, ACL, INI and JSON edits): owner, attributes and SDDL;
 - scheduled task: state, author and principal;
 - once per run: the loaded file system minifilters (`fltmc filters`, elevated runs only) and the installed
@@ -433,7 +508,8 @@ CONFLICT keeps the journal (see `-Uninstall`). `examples/contoso-pinyin` shows t
 Hooks run inside the script, so they may call `Expand-AdPath`, `Assert-AdPathSafe` (call it before touching any
 path; add `-EditInPlace` when the hook edits the content of a `core.preserve` file), `Stop-AdProcessByPath`,
 `Get-AdRunningByPath`, `Get-AdRegValue`, `Set-AdRegValue`, `Update-AdIni`, `Read-AdTextFile`, `Write-AdTextFile`,
-`Say` and `AdGet`. An `Apply` that fails in an expected way (a known failure) may `return (New-AdFailure 'why' <code>)`
+`Say` and `AdGet`. `Get-AdRegValue` returns Binary and `REG_NONE` data as a lowercase hex string, and `Set-AdRegValue`
+takes the same form for those kinds. An `Apply` that fails in an expected way (a known failure) may `return (New-AdFailure 'why' <code>)`
 instead of throwing: it is handled exactly like a thrown error but leaves no `TerminatingError` in `auto.log`
 (code 5 marks an access denial). Prefer `ini-set` or `json-set` over a hook whenever the setting is a plain INI key or JSON
 value. `$Action.args` carries the manifest arguments. Never embed a key, decrypted config or other vendor-derived secret in a hook:
@@ -493,6 +569,16 @@ Install the watch task only after the core-function probe passed (P6); a task th
   any name that exists in System32 or SysWOW64.
 - Registry deletes: refuses keys shallower than three levels, shared roots (`Software\Classes\CLSID`, Run, ...)
   and anything under `SYSTEM\CurrentControlSet\Services` (services are disabled, never deleted).
+- Registry value deletes: refuses the default value, keys shallower than two levels (`HKCU\Environment` excepted, so
+  a vendor's own environment variable can go), every value under
+  `SYSTEM\CurrentControlSet`, `Winlogon`, `Windows NT\CurrentVersion\Windows` and `(User) Shell Folders`, the shared
+  environment variables (`Path`, `PATHEXT`, `TEMP`, `TMP`, `PSModulePath`, `ComSpec`, `windir`) under an
+  `Environment` key, data of a kind that cannot be journaled, and a Run value that does not start a program under the
+  install root or an `allowedRoots` entry (see Registry Values and Browser Policy). A `match` that matches an empty
+  string is rejected when the script is built.
+- Browser policy: only `ExtensionInstallBlocklist` values the tool adds under a free number of the list in force (HKLM,
+  or HKCU when only HKCU has entries, so the owner's user list is never switched off); existing entries are never
+  changed, and only keys the tool created are removed again.
 - No `sc delete`, no binary patching, no Defender changes, no Microsoft domains in hosts.
 
 ## Journal
@@ -502,8 +588,10 @@ Install the watch task only after the core-function probe passed (P6); a task th
 - `kind: "change"` is written BEFORE the change it describes (write-ahead), so an interrupted `-Apply` can be
   rolled back: `ts, app, actionId, actionType, prim, key, desc, reversible, evidence, version, data, original,
   after`. `original` is the state found; `after` is the state the tool is about to write.
-- The `key` identifies the changed object (`fs:<path>`, `reg:<hive><view>\<key>|<value>`, `ifeo:<exe>`,
-  `svc:<name>`, `acl:<path>|<sid>`, `ini:<path>|<section>|<key>`, `json:<path>|<pointer>`, `watchtask:<name>`, ...). The first `original` for a key wins forever: a rerun
+- The `key` identifies the changed object (`fs:<path>`, `reg:<hive><view>\<key>|<value>`, `regkey:<hive><view>\<key>`,
+  `regval:<hive><view>\<key>|<value>`, `extblock:<hive><view>\<policy key>|<id>`, `ifeo:<exe>`, `svc:<name>`,
+  `acl:<path>|<sid>`, `ini:<path>|<section>|<key>`, `json:<path>|<pointer>`, `watchtask:<name>`, ...). An `extblock:`
+  entry's after-state names the value number it wrote; a re-write under another number updates it. The first `original` for a key wins forever: a rerun
   after the vendor reset something does not overwrite the true original. A later line for the same key only
   updates `after` (for example when a rebuilt manifest writes a different value). A placeholder re-created after it
   was deleted reuses its key and after-state, so it adds no line. For `acl:` keys, `after.rights` holds every right
