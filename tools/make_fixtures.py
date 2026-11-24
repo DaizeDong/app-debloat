@@ -169,10 +169,12 @@ FABRIKAM = {
         act("updater-system-tasks", "task-disable", "updater", ["L-R6"], taskPath="\\FabrikamUpdaterSystem\\",
             target=["FabrikamUpdater*"]),
         # A failure that is understood and cannot be fixed is recorded, so every run reports it as a WARN with this
-        # reason instead of a new failure, and -Install can still register the watch task.
-        act("updater-svc", "service-disable", "updater", ["L-R2"], target=["FabrikamDriveUpdateSvc"], stop=True,
+        # reason instead of a new failure, and -Install can still register the watch task. `targets` limits it to the
+        # one service the security suite protects; a failure of the other service stays a FAIL.
+        act("updater-svc", "service-disable", "updater", ["L-R2"],
+            target=["FabrikamDriveUpdateSvc", "FabrikamDriveElevationSvc"], stop=True,
             knownFailure={"reason": "a security suite vetoes the start-type change (access denied, protection level NONE)",
-                          "ref": "L-R2"}),
+                          "ref": "L-R2", "targets": ["FabrikamDriveElevationSvc"]}),
         act("updater-config", "file-placeholder-dir", "updater", ["L-R3"], createIfMissing=True,
             target=["{root}\\resources\\app-update.yml"]),
         act("updater-cache", "acl-deny-write", "updater", ["L-R4"], principal="CurrentUser", emptyFirst=True,

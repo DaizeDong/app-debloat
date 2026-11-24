@@ -1,6 +1,6 @@
 {
   "name": "app-debloat",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Debloat one rogue Windows app: map launch chain, gates and self-repair, then durably block its ads, AI add-ons, telemetry and updaters. Not Windows-wide debloat or uninstall.",
   "author": {
     "name": "DaizeDong"

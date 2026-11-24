@@ -6,7 +6,9 @@
   processes (32-bit WOW64 modules included). Meant to run once, early, behind one UAC prompt.
 
 .DESCRIPTION
-  Refuses to run without elevation. Changes nothing: it only reads and writes files under -Out.
+  Refuses to run without elevation. Changes nothing outside -Out, except that with -Key it creates
+  %ProgramData%\AppDebloat\<key> (admin-only ACL) and writes elevated-tasks.json there (below).
+  Under a read-only instruction or a one-folder write restriction, run it without -Key.
 
   Writes into -Out:
     inventory-elevated.json   scripts\inventory.ps1 run elevated (sees SYSTEM tasks, other-user
@@ -24,6 +26,18 @@
     modules.json              Toolhelp32 module list (TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32)
                               for every running process whose image is under a root
     bundle.json               what ran, counts and every failure
+
+  With -Key <manifest id>, also writes %ProgramData%\AppDebloat\<key>\elevated-tasks.json:
+  captured_at and tasks[{path, name, state, author, actions[{type, execute, class_id}]}] for every
+  scheduled task outside \Microsoft\ (the folders a task-disable action can match), not only the
+  ones matched above. Action arguments are left out: every local user can read this file, and
+  SYSTEM task arguments can carry tokens or license keys (tasks.json under -Out keeps them).
+  A non-elevated dry run of the built script cannot see SYSTEM tasks; it reads this file to print
+  what this elevated enumeration found, and when. The folder is created if missing and gets the
+  admin-only permissions the built script gives it (SYSTEM and Administrators full, Users read);
+  a reparse point at that path is refused. Run again after the vendor adds or changes tasks.
+  If the app is never debloated, nothing removes the folder: delete it by hand (elevated). The
+  built script's -Uninstall removes it otherwise.
 
   Roots are -Root plus the roots inventory.ps1 resolved. The bundle keeps literal paths (the
   inventory still redacts its own); it is real-run DATA for the private companion only.
@@ -44,6 +58,11 @@
 .PARAMETER Out
   Output directory (required, created if missing).
 
+.PARAMETER Key
+  The manifest id of the app's built script (lowercase letters, digits, dashes), which names its
+  state folder %ProgramData%\AppDebloat\<key>. Pick it at P0 and keep it as the manifest id.
+  Writes elevated-tasks.json there for the dry run (see above).
+
 .PARAMETER NoInventory
   Skip the inventory run (only tasks, services and modules).
 
@@ -53,7 +72,7 @@
 .EXAMPLE
   # in an elevated 64-bit Windows PowerShell:
   powershell -NoProfile -ExecutionPolicy Bypass -File .\elevated_readonly.ps1 -App 'ExampleApp' `
-      -Root "$env:ProgramFiles\ExampleApp" -Out D:\private\exampleapp\elevated
+      -Root "$env:ProgramFiles\ExampleApp" -Key exampleapp -Out D:\private\exampleapp\elevated
 #>
 [CmdletBinding()]
 param(
@@ -61,10 +80,13 @@ param(
     [string]$AppFile,
     [string[]]$Root,
     [Parameter(Mandatory = $true)][string]$Out,
+    [string]$Key,
     [switch]$NoInventory,
     [switch]$NoSignature
 )
 $ErrorActionPreference = 'Stop'
+# Same rule as the manifest id, so the folder is the one the built script uses.
+if ($Key -and $Key -cnotmatch '^[a-z0-9][a-z0-9-]{1,40}$') { throw "-Key must be the manifest id (lowercase letters, digits, dashes): '$Key'" }
 
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -73,8 +95,11 @@ if (-not $IsAdmin) {
     if ($App) { $argv += @('-App', "'$App'") }
     if ($AppFile) { $argv += @('-AppFile', "`"$AppFile`"") }
     foreach ($r in @($Root)) { if ($r) { $argv += @('-Root', "`"$r`"") } }
+    if ($Key) { $argv += @('-Key', $Key) }
+    if ($NoInventory) { $argv += '-NoInventory' }
+    if ($NoSignature) { $argv += '-NoSignature' }
     $argv += @('-Out', "`"$Out`"")
-    Write-Host 'Refused: elevated_readonly.ps1 must run in an elevated shell (it only reads; elevation is for visibility).'
+    Write-Host 'Refused: elevated_readonly.ps1 must run in an elevated shell (it writes only under -Out, plus the -Key state file; elevation is for visibility).'
     Write-Host 'Run this once in an elevated 64-bit Windows PowerShell:'
     Write-Host ('  powershell ' + ($argv -join ' '))
     exit 1
@@ -140,9 +165,16 @@ function Test-Refs([string]$s) {
 function Safe-Name([string]$s) { $n = ($s -replace '[\\/:*?"<>|\s]+', '_').Trim('_'); if ($n.Length -gt 120) { $n = $n.Substring(0, 120) }; $n }
 
 # ---------------------------------------------------------------- 2. scheduled tasks (SYSTEM included)
+$allTasks = New-Object System.Collections.Generic.List[object]; $allTasksOk = $false
 try {
     $taskIdx = New-Object System.Collections.Generic.List[object]
     foreach ($t in @(Get-ScheduledTask)) {
+        $acts = @(foreach ($a in @($t.Actions)) { if ($a) { [ordered]@{ type = $a.CimClass.CimClassName -replace '^MSFT_Task', ''; execute = $a.Execute; arguments = $a.Arguments; class_id = $a.ClassId } } })
+        if ($t.TaskPath -notlike '\Microsoft\*') {
+            # Users can read the -Key file, so no arguments here (SYSTEM task arguments can hold tokens).
+            $pubActs = @(foreach ($a in $acts) { [ordered]@{ type = $a.type; execute = $a.execute; class_id = $a.class_id } })
+            $allTasks.Add([ordered]@{ path = $t.TaskPath; name = $t.TaskName; state = $t.State.ToString(); author = $t.Author; actions = $pubActs })
+        }
         $why = $null
         foreach ($a in @($t.Actions)) {
             if ($a.CimClass.CimClassName -eq 'MSFT_TaskExecAction' -and (Test-Refs "$($a.Execute) $($a.Arguments) $($a.WorkingDirectory)")) { $why = 'root'; break }
@@ -156,14 +188,38 @@ try {
         $taskIdx.Add([ordered]@{
             path = $t.TaskPath; name = $t.TaskName; match = $why; state = $t.State.ToString(); user = $t.Principal.UserId
             run_level = $t.Principal.RunLevel.ToString(); hidden = $t.Settings.Hidden; author = $t.Author; xml = $file
-            actions = @(foreach ($a in @($t.Actions)) { [ordered]@{ type = $a.CimClass.CimClassName -replace '^MSFT_Task', ''; execute = $a.Execute; arguments = $a.Arguments; class_id = $a.ClassId } })
-            last_run = $(if ($info -and $info.LastRunTime) { $info.LastRunTime.ToString('o') }); last_result = $(if ($info) { '0x{0:x}' -f $info.LastTaskResult })
-            next_run = $(if ($info -and $info.NextRunTime) { $info.NextRunTime.ToString('o') })
+            actions = $acts
+            last_run = $(if ($info -and $info.LastRunTime) { $info.LastRunTime.ToString('o') } else { $null }); last_result = $(if ($info) { '0x{0:x}' -f $info.LastTaskResult } else { $null })
+            next_run = $(if ($info -and $info.NextRunTime) { $info.NextRunTime.ToString('o') } else { $null })
         })
     }
     Save-Json 'tasks.json' $taskIdx.ToArray()
     $bundle.steps['tasks'] = [ordered]@{ file = 'tasks.json'; count = $taskIdx.Count }
+    $allTasksOk = $true
 } catch { Add-Fail 'tasks' '(all)' $_.Exception.Message }
+
+# ---------------------------------------------------------------- 2a. task list for the built script's dry run (-Key)
+# Written only after a complete enumeration, so a failed one never replaces the last good file. The folder gets the
+# built script's admin-only ACL; a reparse point there is refused (icacls follows it, so it could re-ACL its target).
+if ($Key) {
+    $stateDir = Join-Path $env:ProgramData "AppDebloat\$Key"; $stateFile = Join-Path $stateDir 'elevated-tasks.json'
+    if (-not $allTasksOk) { Add-Fail 'state_tasks' $stateFile 'task enumeration failed; file not written' }
+    else {
+        try {
+            $noLink = { foreach ($d in (Split-Path -Parent $stateDir), $stateDir) {
+                $at = $null; try { $at = [IO.File]::GetAttributes($d) } catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] { }
+                if ($null -ne $at -and ($at -band [IO.FileAttributes]::ReparsePoint)) { throw "$d is a reparse point; not written" } } }
+            & $noLink; [void][IO.Directory]::CreateDirectory($stateDir); & $noLink
+            & icacls.exe $stateDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /L /Q | Out-Null
+            if ($LASTEXITCODE) { throw "icacls exit $LASTEXITCODE on $stateDir (see the console for its message)" }
+            if (Test-Path -LiteralPath $stateFile) { Remove-Item -LiteralPath $stateFile -Force }   # a fresh file, never a planted link
+            $doc = [ordered]@{ schema = 'app-debloat.elevated-tasks/1'; key = $Key; captured_at = $bundle.captured_at
+                scope = 'every scheduled task outside \Microsoft\, enumerated elevated'; count = $allTasks.Count; tasks = $allTasks.ToArray() }
+            [IO.File]::WriteAllText($stateFile, (ConvertTo-Json -InputObject $doc -Depth 6), $utf8)
+            $bundle.steps['state_tasks'] = [ordered]@{ file = $stateFile; count = $allTasks.Count }
+        } catch { Add-Fail 'state_tasks' $stateFile $_.Exception.Message }
+    }
+}
 
 # ---------------------------------------------------------------- 2b. task state baseline (every folder, recursive)
 # The state each matching task had at P0, so a later apply can tell "already disabled before P0" from "changed
@@ -202,7 +258,7 @@ try {
             $stateRows.Add([ordered]@{
                 path = $folderPath; name = $t.Name; full_path = $t.Path; match = $why
                 enabled = [bool]$t.Enabled; state = $stateName; last_run = $lr; last_result = ('0x{0:x}' -f [int64]$t.LastTaskResult); next_run = $nr
-                author = $author; registered = $regDate; user = $(if ($def) { $def.Principal.UserId }); hidden = $(if ($def) { [bool]$def.Settings.Hidden })
+                author = $author; registered = $regDate; user = $(if ($def) { $def.Principal.UserId } else { $null }); hidden = $(if ($def) { [bool]$def.Settings.Hidden } else { $null })
                 actions = $acts; events = @()
             })
         }
@@ -306,7 +362,7 @@ try {
         if ($null -eq $mods) { Add-Fail 'modules' "pid $id" "Toolhelp32 error $err" }
         $modIdx.Add([ordered]@{
             pid = [int]$id; ppid = [int]$p.ParentProcessId; name = $p.Name; image = $img; command_line = $p.CommandLine
-            wow64 = $(if ($wow -eq 1) { $true } elseif ($wow -eq 0) { $false } else { $null }); error = $(if ($null -eq $mods) { $err })
+            wow64 = $(if ($wow -eq 1) { $true } elseif ($wow -eq 0) { $false } else { $null }); error = $(if ($null -eq $mods) { $err } else { $null })
             modules = @(foreach ($m in @($mods)) { if ($m) { [ordered]@{ path = $m.Path; base = $m.Base; size = $m.Size } } })
         })
     }
@@ -320,4 +376,5 @@ Write-Host ("elevated bundle: tasks {0} (state baseline {4}), services {1}, proc
     $(if ($bundle.steps['services']) { $bundle.steps['services'].count } else { 'n/a' }),
     $(if ($bundle.steps['modules']) { $bundle.steps['modules'].processes } else { 'n/a' }), $bundle.failures.Count,
     $(if ($bundle.steps['task_states']) { "$($bundle.steps['task_states'].count), $($bundle.steps['task_states'].disabled) disabled" } else { 'n/a' }))
+if ($bundle.steps['state_tasks']) { Write-Host ("task list for the dry run: {0} ({1} tasks outside \Microsoft\)" -f $bundle.steps['state_tasks'].file, $bundle.steps['state_tasks'].count) }
 Write-Host "out: $outDir"

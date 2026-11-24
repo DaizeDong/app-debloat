@@ -1,10 +1,10 @@
 # Roadmap
 
-Current: **v0.1.4**
+Current: **v0.1.5**
 
 Release history is recorded in [CHANGELOG.md](CHANGELOG.md).
 
-## v0.1.4 (current)
+## v0.1.5 (current)
 - Pipeline P0 to P7 with mandatory app-specific checkpoints, category profiles (IME, Electron/CEF, netdisk and downloader, Tencent IM, OEM utility, office suite) and a worked Sogou Pinyin case.
 - Read-only analysis tools: `inventory.ps1`, `pe_triage.py` (imports, launch strings, xrefs; optional REA decompilation), `snapshot_diff.py`, a frida launch tracer.
 - Manifest-driven engine that builds one single-file script per app with dry-run, `-Apply`, `-Install`, `-Uninstall` and a write-ahead journal: exactly one mode per run, unknown versions refused in every mutating mode, real-path and vendor-identity checks on roots and targets, `inferred`/`hypothesis` actions inactive behind named options, undo that restores only what the tool wrote and reports conflicts, uninstall that keeps its journal when anything fails.

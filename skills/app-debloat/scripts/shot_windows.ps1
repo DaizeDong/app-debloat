@@ -18,9 +18,15 @@
   canvas (unaware window, aware capturer). The index records both awareness values; a
   DPI-unaware window is captured at its logical size.
 
-  Minimized and cloaked windows cannot paint and are listed with a skip reason. A capture that
-  comes back as one flat color is marked "blank" (common for windows that are hidden behind
-  the GPU compositor or still loading); retake it later rather than trusting it.
+  Minimized and cloaked windows cannot paint. They are still listed in the index, with
+  minimized = true (plus restores_maximized, and the restored size unless it restores maximized)
+  or cloaked = true and a skip reason, and counted on the console. A minimized window proves the
+  process is up with a window present, not what the window shows; this script never restores it
+  (that would be input to the owner's window). For
+  a capture, open a new window through the app's own command line and run again, or record that
+  weaker pass (reference/pipeline-apply.md, P6). A capture that comes back as one flat color is
+  marked "blank" (common for windows that are hidden behind the GPU compositor or still
+  loading); retake it later rather than trusting it.
 
   Window titles and screenshots are real-run DATA: write -Out to the private companion, never
   into the tool repo.
@@ -108,8 +114,12 @@ public static class AdShot {
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int cb);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int a, out int v, int cb);
     [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+    [StructLayout(LayoutKind.Sequential)] struct WINDOWPLACEMENT { public int length, flags, showCmd, minX, minY, maxX, maxY; public RECT normal; }
+    [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT p);
 
-    public class Win { public long Hwnd; public uint Pid; public string Cls; public string Title; public bool Iconic; public bool Cloaked; public int L, T, R, B; public int VL, VT, VR, VB; }
+    // NW, NH: the restored (normal) size, which a minimized window's own rect does not show.
+    // PlFlags: WINDOWPLACEMENT.flags; WPF_RESTORETOMAXIMIZED (2) means it restores maximized, not to NW x NH.
+    public class Win { public long Hwnd; public uint Pid; public string Cls; public string Title; public bool Iconic; public bool Cloaked; public int L, T, R, B; public int VL, VT, VR, VB; public int NW, NH; public int PlFlags; }
     public static Win[] VisibleTopLevel() {
         var res = new List<Win>();
         EnumProc cb = (h, l) => {
@@ -120,8 +130,10 @@ public static class AdShot {
             RECT r; GetWindowRect(h, out r);
             RECT v; if (DwmGetWindowAttribute(h, 9, out v, Marshal.SizeOf(typeof(RECT))) != 0) v = r;   // DWMWA_EXTENDED_FRAME_BOUNDS
             int cloak = 0; DwmGetWindowAttribute(h, 14, out cloak, 4);                                     // DWMWA_CLOAKED
+            var wp = new WINDOWPLACEMENT(); wp.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+            if (!GetWindowPlacement(h, ref wp)) { wp.normal = new RECT(); wp.flags = 0; }
             res.Add(new Win { Hwnd = h.ToInt64(), Pid = pid, Cls = c.ToString(), Title = t.ToString(), Iconic = IsIconic(h), Cloaked = cloak != 0,
-                L = r.L, T = r.T, R = r.R, B = r.B, VL = v.L, VT = v.T, VR = v.R, VB = v.B });
+                L = r.L, T = r.T, R = r.R, B = r.B, VL = v.L, VT = v.T, VR = v.R, VB = v.B, NW = wp.normal.R - wp.normal.L, NH = wp.normal.B - wp.normal.T, PlFlags = wp.flags });
             return true;
         };
         EnumWindows(cb, IntPtr.Zero); GC.KeepAlive(cb);
@@ -204,12 +216,13 @@ function Test-Match([string]$img) {
 # The Chinese alternatives are .NET \u escapes, so this file stays ASCII.
 $restoreRx = New-Object regex(('restore pages|did(n''t| not) shut down correctly|\u6062\u590d(\u9875\u9762|\u7f51\u9875)|\u6062\u5fa9(\u9801\u9762|\u7db2\u9801)|\u672a\u6b63\u786e\u5173\u95ed|\u672a\u6b63\u78ba\u95dc\u9589' +
     $(if ($BubbleTitleRegex) { '|' + $BubbleTitleRegex } else { '' })), 'IgnoreCase')
+# Tags of one window as plain strings (none: nothing). Callers wrap the result in @().
 function Get-WindowTags($w) {
-    $tags = @()
     $vw = $w.VR - $w.VL; $vh = $w.VB - $w.VT
-    if ($w.Title -and $vw -lt 700 -and $vh -lt 400 -and $restoreRx.IsMatch($w.Title)) { $tags += 'restore_pages_bubble' }
-    ,$tags
+    if ($w.Title -and $vw -lt 700 -and $vh -lt 400 -and $restoreRx.IsMatch($w.Title)) { 'restore_pages_bubble' }
 }
+$tagMeaning = [ordered]@{ restore_pages_bubble = 'Chromium crash-restore bubble, a side effect of a forced close (stop_app.ps1); not a new popup' }
+$tagNote = @{ restore_pages_bubble = 'side effect of a forced close, not a new popup' }
 
 $outDir = [IO.Path]::GetFullPath($Out)
 [void][IO.Directory]::CreateDirectory($outDir)
@@ -227,10 +240,13 @@ foreach ($w in [AdShot]::VisibleTopLevel()) {
     $e = [ordered]@{
         hwnd = ('0x{0:x}' -f $w.Hwnd); pid = [int]$w.Pid; image = $img; class = $w.Cls; title = $w.Title
         rect = @($w.L, $w.T, $w.R, $w.B); visible_rect = @($w.VL, $w.VT, $w.VR, $w.VB)
+        # A window that restores maximized gets no restored_size: its normal rect is the pre-maximize size.
+        minimized = [bool]$w.Iconic; restores_maximized = $(if ($w.Iconic) { ($w.PlFlags -band 2) -ne 0 } else { $null })
+        restored_size = $(if ($w.Iconic -and -not ($w.PlFlags -band 2) -and $w.NW -gt 0 -and $w.NH -gt 0) { @($w.NW, $w.NH) } else { $null }); cloaked = [bool]$w.Cloaked
         window_dpi = $null; file = $null; blank = $null; print_flags = $null; skipped = $null; error = $null
         tags = @(Get-WindowTags $w)
     }
-    if ($w.Iconic) { $e.skipped = 'minimized (restoring it would be input; not done)' }
+    if ($w.Iconic) { $e.skipped = 'minimized: window present, not captured (restoring it would be input to the owner''s window)' }
     elseif ($w.Cloaked) { $e.skipped = 'cloaked by DWM' }
     elseif (($w.R - $w.L) -lt $MinSize -or ($w.B - $w.T) -lt $MinSize) { $e.skipped = "smaller than $MinSize px" }
     else {
@@ -246,23 +262,32 @@ foreach ($w in [AdShot]::VisibleTopLevel()) {
     $index.Add($e)
 }
 
+$shot = @($index | Where-Object { $_.file }).Count
+$minN = @($index | Where-Object { $_.minimized }).Count
+$blankN = @($index | Where-Object { $_.blank }).Count
+$bubbleN = @($index | Where-Object { $_.tags -contains 'restore_pages_bubble' }).Count
 $doc = [ordered]@{
     schema = 'app-debloat.shots/1'; captured_at = (Get-Date).ToUniversalTime().ToString('o')
     dpi_awareness = $dpiNow; dpi_set = $dpiSet
     match = [ordered]@{ image_path_regex = $ImagePathRegex; roots = @($Root); bubble_title_regex = $BubbleTitleRegex }
-    tag_meaning = [ordered]@{ restore_pages_bubble = 'Chromium crash-restore bubble, a side effect of a forced close (stop_app.ps1); not a new popup' }
+    counts = [ordered]@{ matched = $index.Count; captured = $shot; minimized = $minN; blank = $blankN; restore_pages_bubbles = $bubbleN }
+    tag_meaning = $tagMeaning
     windows = $index.ToArray()
 }
 $idxPath = Join-Path $outDir ($prefix + 'index.json')
 [IO.File]::WriteAllText($idxPath, ($doc | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 
-$shot = @($index | Where-Object { $_.file }).Count
-$blankN = @($index | Where-Object { $_.blank }).Count
-$bubbleN = @($index | Where-Object { $_.tags -contains 'restore_pages_bubble' }).Count
-Write-Host ("windows matched: {0}, captured: {1}, blank: {2}, skipped or failed: {3}, restore-pages bubbles: {4}, dpi: {5}" -f $index.Count, $shot, $blankN, ($index.Count - $shot), $bubbleN, $dpiNow)
+Write-Host ("windows matched: {0}, captured: {1}, minimized: {2}, blank: {3}, other skipped or failed: {4}, restore-pages bubbles: {5}, dpi: {6}" -f `
+    $index.Count, $shot, $minN, $blankN, ($index.Count - $shot - $minN), $bubbleN, $dpiNow)
 foreach ($e in $index) {
-    $state = $(if ($e.file) { $e.file + $(if ($e.blank) { ' (blank)' } else { '' }) } elseif ($e.skipped) { 'skipped: ' + $e.skipped } else { 'error: ' + $e.error })
-    $tagText = $(if (@($e.tags).Count) { ' [' + (@($e.tags) -join ', ') + ': side effect of a forced close, not a new popup]' } else { '' })
+    $state = $(if ($e.file) { $e.file + $(if ($e.blank) { ' (blank)' } else { '' }) }
+               elseif ($e.minimized) { 'minimized: window present, not captured' + $(if ($e.restores_maximized) { ' (restores maximized)' } elseif ($e.restored_size) { " (restored size $($e.restored_size -join 'x'))" } else { '' }) }
+               elseif ($e.skipped) { 'skipped: ' + $e.skipped } else { 'error: ' + $e.error })
+    $tagText = $(if (@($e.tags).Count) { ' [' + ((@($e.tags) | ForEach-Object { if ($tagNote[$_]) { "$_`: $($tagNote[$_])" } else { $_ } }) -join '; ') + ']' } else { '' })
     Write-Host ("  pid {0} {1} '{2}' -> {3}{4}" -f $e.pid, $e.class, $e.title, $state, $tagText)
+}
+if ($minN -and -not $shot) {
+    Write-Host (("No window captured: {0} matched window(s) are minimized. That shows the process is up with a window present, not what it shows. " -f $minN) +
+        'For a capture, open a new window through the app''s own command line and run again; otherwise record the weaker pass (reference/pipeline-apply.md, P6).')
 }
 Write-Host "index: $idxPath"

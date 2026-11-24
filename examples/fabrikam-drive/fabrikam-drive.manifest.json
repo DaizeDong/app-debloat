@@ -143,12 +143,16 @@
       "reversible": true,
       "reapply": true,
       "target": [
-        "FabrikamDriveUpdateSvc"
+        "FabrikamDriveUpdateSvc",
+        "FabrikamDriveElevationSvc"
       ],
       "stop": true,
       "knownFailure": {
         "reason": "a security suite vetoes the start-type change (access denied, protection level NONE)",
-        "ref": "L-R2"
+        "ref": "L-R2",
+        "targets": [
+          "FabrikamDriveElevationSvc"
+        ]
       }
     },
     {

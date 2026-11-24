@@ -128,7 +128,7 @@ Common fields: `id`, `type`, `category` (`ad`, `ai`, `telemetry`, `updater`, `re
 (default true; false items are left alone by `-Uninstall`), `reapply` (true only for blocking actions: the watch
 task re-confirms them), `effect` (`block` default, or `reset`; `reset` with `reapply: true` is rejected), `when` /
 `unless` (option name), `backup` (placeholder types only, default true; see the table), `knownFailure`
-(`{reason, ref}`, see Known Failures).
+(`{reason, ref}` for the whole action, or `{reason, ref, targets}` for some of its items, see Known Failures).
 
 **evidence** is the weakest ledger status among the action's `rationale` entries, copied verbatim
 (`reference/ledger.md`): `observed`, `anchored`, `inferred` or `hypothesis`.
@@ -174,7 +174,7 @@ exists, and CONFLICT (left untouched) for anything else.
 | `acl-deny-write` | `target[]`, `principal` (`CurrentUser`, `Users`, SID), `emptyFirst`, `createIfMissing` | adds exactly the missing deny rights (WriteData, AppendData, WriteEA, WriteAttributes; inherited by children on folders) for that SID; records which rights it added | takes away exactly those rights from that SID's entry with the same inheritance; other deny entries and rights stay; removes a folder it created |
 | `ifeo-block` | `target[]` bare exe names | IFEO `Debugger` = `%SystemRoot%\System32\AppDebloat-blocked\<id>.exe` (never exists) | deletes only its own Debugger value, the key only if it created it |
 | `reg-set` | `target` key, `name`+`value` or `values{}`, `kind` (DWord, QWord, String, ExpandString, MultiString), `view` | sets values, records the old ones | restores or deletes each value |
-| `reg-delete-key` | `target[]`, optional `match` regex over subkeys, `view` | `reg export` to the state folder, then deletes; TrustedInstaller-owned keys are a WARN, not a FAIL | `reg import`, unless the key exists again (CONFLICT) |
+| `reg-delete-key` | `target[]`, optional `match` regex over subkeys, `view` | `reg export` to the state folder, then deletes; TrustedInstaller-owned keys are a WARN, not a FAIL (a known failure when `knownFailure` covers the key) | `reg import`, unless the key exists again (CONFLICT) |
 | `shellext-block` | `clsids[]`, `handlerMatch`, `handlerParents[]`, `removeClsid`, `label` | `Shell Extensions\Blocked` values, deletes the CLSID keys and matching ContextMenuHandlers (HKLM and HKCU, 64-bit and WOW6432Node). A handler key whose name or default value is the CLSID with a trailing `-` (the vendor's own off switch) counts as the same CLSID | removes Blocked values, imports deleted keys |
 | `toast-off` | `target[]` AppUserModelIDs (wildcards match existing) | `Notifications\Settings\<id>` `Enabled=0` | restores |
 | `firewall-block-program` | `target[]` program paths, `direction` | rule `AppDebloat <id> <action> <exe> <hash>` in group `AppDebloat-<id>` | removes that rule only if its group and program are still the recorded ones |
@@ -200,6 +200,23 @@ mode, so a miss is visible instead of a plain SKIP:
 [INFO] updater-tasks: searched \FabrikamUpdaterSystem\ and its subfolders for FabrikamUpdater*: 2 matches (...)
 [INFO] updater-task: searched \FabrikamDrive\ (this folder only; taskPath also searches subfolders) for FabrikamDriveUpdateTask*: 0 matches
 ```
+
+**Tasks the Dry Run Cannot See.** Without elevation, `Get-ScheduledTask` does not list tasks that only SYSTEM or
+Administrators may read, which is where most vendor updater tasks live. A non-elevated run therefore appends
+`(not elevated: SYSTEM tasks are invisible)` to every task search, so `0 matches` is never read as absence. When
+`scripts/elevated_readonly.ps1 -Key <id>` has saved its task list to `%ProgramData%\AppDebloat\<id>\elevated-tasks.json`
+(every task outside `\Microsoft\`, not only those that mention the app), the line also gives that list's count for
+the same search and the date it was taken; the engine's own `<Prefix>Debloat-*` tasks and `\Microsoft\` are left out
+of it as they are of the live search:
+
+```
+[INFO] updater-tasks: searched \FabrikamUpdaterSystem\ and its subfolders for FabrikamUpdater*: 0 matches (not elevated: SYSTEM tasks are invisible); last elevated enumeration (2030-01-01 09:30): 2 matches (...)
+```
+
+The saved count is information only: the plan lists what the live search found, and the elevated `-Apply` plans
+from its own live search. The file may be a bare array of rows or `{captured_at, tasks: [rows]}`; a row names its task
+by `path` and `name` (or `TaskPath` and `TaskName`, or `full_path`). The date is `captured_at`, else the file's time.
+A file that cannot be read is reported on the same line. `-Uninstall` deletes it with the other state files.
 
 Technique choice, least flagged first: placeholder and ACL, then service disable, then task disable, then a
 per-program firewall rule, then IFEO, and hosts last. Security products remove IFEO keys and flag hosts edits, so
@@ -246,12 +263,39 @@ the old one. Record it on the action:
 ```
 
 `reason` says why it fails and `ref` points at the ledger item or verification note that shows it; both are
-required. Every run (dry run included) lists the action under `Known Failures` as a WARN naming the reason, so it
-is never forgotten. When an item of that action fails, at plan time or while applying, the failure is logged as
-`[WARN] [id] known failure (ref ...): reason :: error` and counted as a known failure, not as a failure: it does not
-set exit code 1 and does not stop `-Install`. When the item succeeds, an INFO line says to remove `knownFailure`
-once it stays fixed. The `-Auto` line in `history.log` counts known failures separately. Record a knownFailure
-only after the access-denied diagnostics (below) were read; never use it to hide a failure nobody explained.
+required. Without `targets` it covers every item of the action. When only some targets fail, list them in `targets`,
+so a new failure of another target stays a FAIL:
+
+```json
+{ "id": "updater-svc", "type": "service-disable", "target": ["FabrikamDriveUpdateSvc", "FabrikamDriveElevationSvc"],
+  "knownFailure": { "reason": "...", "ref": "L-R2", "targets": ["FabrikamDriveElevationSvc"] }, ... }
+```
+
+Each `targets` entry names an item the way the action names its targets, with tokens expanded and `*` and `?`
+allowed (case-insensitive): a service name, `\Folder\TaskName`, a file or folder path (`{root}\updater_*.exe`), a
+bare exe name (`ifeo-block`), `HKCU\Key\ValueName` (`reg-set`, `shellext-block`, `toast-off`), `HKLM\Key` (deleted
+keys), a program path (`firewall-block-program`) or the hook's own item `Key`. A registry entry may spell the hive
+any way an action target may (`HKEY_CURRENT_USER\`, `HKCU:\`) and may end in `\`: both sides are compared as
+`HKLM\...` or `HKCU\...` with no trailing backslash. `hosts-block` and `preboot-file-edit` plan one item per action
+and take only the whole-action form. A failure while the plan is built (before any item exists) is a known failure
+only under the whole-action form; with `targets` it stays a FAIL, since no target names it.
+
+Every run (dry run included) lists the action under `Known Failures` as a WARN naming the reason and its targets,
+so it is never forgotten. Each planned item it covers is marked `known to fail (ref ...)`, and the plan counts them
+apart: `Plan: 4 change(s), 1 of them known to fail` and, at the end of a dry run,
+`4 change(s) planned, 1 of them known to fail`. When a covered item fails, at plan time or while applying, the
+failure is logged as `[WARN] [id] known failure (ref ...): reason :: item :: error` and counted as a known failure,
+neither as a failure nor as a warning: it does not set exit code 1 and does not stop `-Install`. When a covered item
+succeeds, an INFO line says to remove `knownFailure` once it stays fixed. The `-Auto` line in `history.log` stays
+compact; it names each action once with its count, and the full text stays in `auto.log`:
+
+```
+2030-01-01T06:00:00 engine 1.4.0 fabrikam-drive 5.3.1|FabrikamDrive: 0 change(s), 0 failure(s), 1 known failure(s) [updater-svc x1, ref L-R2]
+```
+
+A failing `sc.exe` is reported without throwing, so a handled failure leaves no `TerminatingError` in the `auto.log`
+transcript (PowerShell records every thrown error there, even a caught one). Record a knownFailure only after the
+access-denied diagnostics (below) were read; never use it to hide a failure nobody explained.
 
 ## Access-Denied Diagnostics
 
@@ -267,7 +311,7 @@ or the PermissionDenied category), the engine prints a read-only diagnostic bloc
 
 A security suite can veto a change per item even when the permissions and protection level allow it. The engine
 never works around a denial (no ownership change, no ACL rewrite, no retry as another account): record it as
-`knownFailure` and use another lever (`reference/levers.md`). Items with a `knownFailure` skip the block.
+`knownFailure` and use another lever (`reference/levers.md`). Items a `knownFailure` covers skip the block.
 
 ## Loaded-Module Check
 
@@ -326,7 +370,9 @@ CONFLICT keeps the journal (see `-Uninstall`). `examples/contoso-pinyin` shows t
 Hooks run inside the script, so they may call `Expand-AdPath`, `Assert-AdPathSafe` (call it before touching any
 path; add `-EditInPlace` when the hook edits the content of a `core.preserve` file), `Stop-AdProcessByPath`,
 `Get-AdRunningByPath`, `Get-AdRegValue`, `Set-AdRegValue`, `Update-AdIni`, `Read-AdTextFile`, `Write-AdTextFile`,
-`Say` and `AdGet`. Prefer `ini-set` or `json-set` over a hook whenever the setting is a plain INI key or JSON
+`Say` and `AdGet`. An `Apply` that fails in an expected way (a known failure) may `return (New-AdFailure 'why' <code>)`
+instead of throwing: it is handled exactly like a thrown error but leaves no `TerminatingError` in `auto.log`
+(code 5 marks an access denial). Prefer `ini-set` or `json-set` over a hook whenever the setting is a plain INI key or JSON
 value. `$Action.args` carries the manifest arguments. Never embed a key, decrypted config or other vendor-derived secret in a hook:
 derive it at run time from the user's own install and keep it in memory.
 
@@ -334,10 +380,10 @@ derive it at run time from the user's own install and keep it in memory.
 
 | Mode | Behavior |
 |---|---|
-| (none) | dry run: resolves, prints the header (root, how it was found, identity), the numbered plan, the inactive actions and the options not selected; changes nothing, needs no elevation |
+| (none) | dry run: resolves, prints the header (root, how it was found, identity), the numbered plan (items a `knownFailure` covers are marked and counted apart), the inactive actions and the options not selected; changes nothing, needs no elevation (task searches then say what they cannot see, see Task Folders) |
 | `-Apply` | builds the same plan, prints it, then executes exactly those items |
 | `-Install` | refuses if a task named `<Prefix>Debloat-Watch` exists that the journal does not record; applies the plan first; then, only when the apply had no failures (known failures do not count), copies the script to `%ProgramData%\AppDebloat\<id>\<Prefix>Debloat.ps1` (SYSTEM and Administrators full, Users read), saves options to `options.json`, journals and registers `<Prefix>Debloat-Watch` (logon + every 6 h, current user, highest, `conhost --headless`). After a failed apply it registers nothing, prints `Watch task NOT registered` with the reason and exits 1 |
-| `-Auto` | used by the watch task: saved options, only `reapply: true` actions, transcript to `auto.log`, one line per run in `history.log` (changes, failures, known failures, WARN text, fingerprint changes, refusals) |
+| `-Auto` | used by the watch task: saved options, only `reapply: true` actions, transcript to `auto.log`, one line per run in `history.log` (changes, failures, known failures as `[action-id xN, ref R]`, other WARN text, fingerprint changes, refusals) |
 | `-Uninstall` | replays the journal in reverse (see below), prints the vendor files that need a reinstall; works even when the app is gone |
 
 At most one of `-Apply`, `-Install`, `-Uninstall`, `-Auto` per run: a combination is refused with exit 2 before
@@ -349,8 +395,8 @@ are removed only when the journal created them and they still match the recorded
 undone cleanly gets an `undone` journal line, so a rerun never replays it. Any WARN, CONFLICT or failure is counted:
 the journal and the state folder are kept, a summary lists every item left behind, and the exit code is 1. Resolve
 the items by hand and run `-Uninstall` again. When nothing is left, the engine deletes only the files it writes in
-the state folder (journal, options, state, logs, backups, exports, its own scripts) and the folder if it is then
-empty.
+the state folder (journal, options, state, logs, backups, exports, its own scripts, the saved elevated task list)
+and the folder if it is then empty.
 
 Exit 0 ok, 1 at least one FAIL (plan-time refusals included) or an `-Uninstall` that left items behind, 2 refused
 before any change (more than one mode, not elevated, invalid manifest, app not found, root refused or failing the
@@ -378,7 +424,8 @@ Install the watch task only after the core-function probe passed (P6); a task th
   action (or the undo step) instead of being treated as "not present". Existence lookups produce no error record
   for a plain miss (tasks come from one full enumeration, firewall rules are queried with `SilentlyContinue` and
   only `ObjectNotFound` is accepted, services and registry return null), so transcripts and `auto.log` show no
-  `TerminatingError` for "not found".
+  `TerminatingError` for "not found". A failing `sc.exe config` and a service that does not stop are reported
+  without throwing too, so a handled failure (a known failure, a WARN) is not logged as one either.
 - IFEO: bare vendor exe names only; refuses generic names (updater.exe, setup.exe, crashpad_handler.exe, ...) and
   any name that exists in System32 or SysWOW64.
 - Registry deletes: refuses keys shallower than three levels, shared roots (`Software\Classes\CLSID`, Run, ...)

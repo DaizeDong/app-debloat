@@ -18,6 +18,10 @@
   restores an original only where the current state is still the one this script wrote.
   Actions backed only by inferred or hypothesis evidence are INACTIVE: the plan lists them with the option that
   enables them. Versions not listed in the manifest are refused by -Apply, -Install and -Auto unless -Force.
+  Planned items that a recorded knownFailure covers are marked and counted apart ("N change(s) planned, K of them
+  known to fail"). Without elevation, scheduled tasks that only SYSTEM or Administrators can read are invisible:
+  every task search then says so, and when an elevated enumeration was saved to
+  %ProgramData%\AppDebloat\@@APP_ID@@\elevated-tasks.json it also prints that list's match count and date.
   Exit code: 0 ok, 1 a step failed or -Uninstall left items behind, 2 refused before any change (more than one
   mode, not elevated, not installed, identity check failed, unsupported version, bad manifest).
 
@@ -39,7 +43,8 @@
   journal and the state folder and exits 1; run it again after resolving them.
 
 .PARAMETER Auto
-  Used by the @@APP_PREFIX@@Debloat-Watch task: saved options, blocking actions only, log to auto.log and history.log.
+  Used by the @@APP_PREFIX@@Debloat-Watch task: saved options, blocking actions only, full log to auto.log and one
+  compact line per run to history.log (known failures as [action-id xN, ref R]; their full text stays in auto.log).
   On a version the manifest does not list it changes nothing, logs a WARN line and exits 2.
 
 .PARAMETER InstallRoot

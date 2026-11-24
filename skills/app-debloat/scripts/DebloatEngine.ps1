@@ -5,7 +5,7 @@
 # file inlined, so users download one file. Nothing here runs on load; Invoke-AppDebloat is the entry.
 # Reference: reference/manifest.md (schema, action types, journal, modes, exit codes).
 
-$script:AdEngineVersion = '1.3.0'
+$script:AdEngineVersion = '1.4.0'
 $script:AdEngineSource = $PSCommandPath
 $script:Ad = $null
 
@@ -17,9 +17,10 @@ function AdGet($o, [string]$n, $d = $null) {
     if ($pp) { return $pp.Value }
     $d
 }
-function Say([string]$tag, [string]$msg) {
+# -NoCount prints the line without counting it as a warning: known failures are counted apart.
+function Say([string]$tag, [string]$msg, [switch]$NoCount) {
     $color = @{ DO = 'Yellow'; OK = 'Green'; SKIP = 'DarkGray'; WARN = 'Magenta'; FAIL = 'Red'; INFO = 'Gray'; CONFLICT = 'Red'; INACTIVE = 'DarkCyan' }[$tag]
-    if ($script:Ad) {
+    if ($script:Ad -and -not $NoCount) {
         if ($tag -eq 'WARN') { $script:Ad.Warnings++; $script:Ad.WarnLines.Add($msg) }
         if ($tag -eq 'FAIL') { $script:Ad.Failures++ }
         if ($tag -eq 'CONFLICT') { $script:Ad.Conflicts++ }
@@ -32,8 +33,24 @@ function Invoke-AdNative([string]$exe, [string[]]$argv, [switch]$NoThrow) {
     $out = & $exe @argv 2>&1 | ForEach-Object { "$_" }
     $code = $LASTEXITCODE
     if ($code -and -not $NoThrow) { throw "$exe exit $code`: $($out -join ' ')" }
-    if ($NoThrow) { return [pscustomobject]@{ Code = $code; Out = ($out -join ' ') } }
+    if ($NoThrow) { return [pscustomobject]@{ Code = $code; Out = ($out -join ' '); Lines = @($out | Where-Object { $null -ne $_ }) } }
     $out
+}
+# Output lines of a native command, plus 'exit N' when it failed. Never throws (used for read-only diagnostics).
+function Get-AdNativeLines([string]$exe, [string[]]$argv) {
+    $r = Invoke-AdNative $exe $argv -NoThrow
+    $r.Lines; if ($r.Code) { "exit $($r.Code)" }
+}
+# A failure handed back instead of thrown. Start-Transcript logs every thrown error as TerminatingError, even one
+# that is caught, so an expected failure (a known failure) must not be thrown: auto.log then shows only real errors.
+# Invoke-AdItem and hook Apply blocks may return it; the caller handles it exactly like a thrown error.
+function New-AdFailure([string]$msg, [int]$code = 0) {
+    $cat = if ($code -eq 5) { [Management.Automation.ErrorCategory]::PermissionDenied } else { [Management.Automation.ErrorCategory]::NotSpecified }
+    [pscustomobject]@{ AdFailure = (New-Object Management.Automation.ErrorRecord((New-Object Exception $msg), 'AppDebloatFailure', $cat, $null)) }
+}
+function Get-AdFailure($r) {
+    foreach ($x in @($r)) { if ($null -ne $x -and $x.PSObject.Properties['AdFailure']) { return $x.AdFailure } }
+    $null
 }
 function Test-AdIsAdmin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -535,6 +552,52 @@ function Get-AdTaskPathRefusal([string]$tp) {
 function Get-AdTaskIdentity($t) {
     (@($t.Actions) | ForEach-Object { "$(AdGet $_ 'Execute')|$(AdGet $_ 'Arguments')|$(AdGet $_ 'ClassId')" }) -join ';'
 }
+# The task list a past elevated enumeration saved for this app: %ProgramData%\AppDebloat\<id>\elevated-tasks.json,
+# written by scripts/elevated_readonly.ps1 -Key <id>. Read once per run. Rows = $null when there is no such file.
+# Accepts a bare array of rows or {captured_at, tasks: [rows]}; a row names its task as path + name (TaskPath +
+# TaskName, or full_path).
+function Get-AdSavedTasks {
+    if ($null -ne $script:Ad.SavedTasks) { return $script:Ad.SavedTasks }
+    $r = @{ Rows = $null; When = $null; Error = $null; Path = (Join-Path $script:Ad.StateDir 'elevated-tasks.json') }
+    if (Test-Path -LiteralPath $r.Path -PathType Leaf) {
+        try {
+            $j = [IO.File]::ReadAllText($r.Path) | ConvertFrom-Json
+            $list = if ($j -is [array]) { $j } else { AdGet $j 'tasks' @() }
+            $rows = New-Object System.Collections.Generic.List[object]
+            foreach ($t in @($list)) {
+                if ($null -eq $t) { continue }
+                $p = AdGet $t 'path' (AdGet $t 'TaskPath'); $n = AdGet $t 'name' (AdGet $t 'TaskName')
+                $fp = AdGet $t 'full_path'
+                if (-not $n -and $fp) { $i = "$fp".LastIndexOf('\'); $p = "$fp".Substring(0, $i + 1); $n = "$fp".Substring($i + 1) }
+                if (-not $n) { continue }
+                $rows.Add([pscustomobject]@{ Path = (Get-AdTaskFolder "$p"); Name = "$n" })
+            }
+            $r.Rows = $rows.ToArray()
+            $dt = [datetime]::MinValue; $ca = AdGet $j 'captured_at'
+            $r.When = if ($ca -and [datetime]::TryParse("$ca", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$dt)) { $dt.ToLocalTime() } else { (Get-Item -LiteralPath $r.Path).LastWriteTime }
+        } catch {
+            # ConvertFrom-Json appends the document text after the offset; keep only the reason.
+            $why = (@("$($_.Exception.Message)" -split '\r?\n')[0] -replace '\s*\(\d+\):.*$', '')
+            $r.Rows = $null; $r.Error = "$($r.Path): $($why.Substring(0, [Math]::Min(200, $why.Length)))"
+        }
+    }
+    $script:Ad.SavedTasks = $r
+    $r
+}
+# Suffix for a task-search line. Without elevation Get-ScheduledTask cannot see tasks that only SYSTEM or
+# Administrators may read, so a non-elevated search says so, and adds the count of the saved elevated enumeration
+# for the same search when one exists. Empty when elevated.
+function Get-AdTaskSearchNote([string]$folder, [string]$name, [bool]$recurse) {
+    if ($script:Ad.IsAdmin) { return '' }
+    $s = ' (not elevated: SYSTEM tasks are invisible)'
+    $saved = Get-AdSavedTasks
+    if ($saved.Error) { return "$s; last elevated enumeration unreadable: $($saved.Error)" }
+    if ($null -eq $saved.Rows) { return $s }
+    $pp = if ($recurse) { "$folder*" } else { $folder }
+    $hit = @($saved.Rows | Where-Object { $_.Path -like $pp -and $_.Name -like $name -and $_.Name -notlike "$($script:Ad.Prefix)Debloat-*" -and $_.Path -notlike '\Microsoft\*' })
+    "$s; last elevated enumeration ($($saved.When.ToString('yyyy-MM-dd HH:mm'))): $($hit.Count) match$(if ($hit.Count -ne 1) { 'es' })" +
+        $(if ($hit.Count) { " ($((@($hit | ForEach-Object { "$($_.Path)$($_.Name)" }) | Select-Object -First 5) -join ', '))" } else { '' })
+}
 # Firewall rules with this display name. A miss is not an error record (SilentlyContinue); any other error throws.
 function Get-AdFirewallRules([string]$displayName) {
     $ev = $null
@@ -816,6 +879,12 @@ function Test-AdManifest($m) {
         if ($t -eq 'hook' -and -not (AdGet $a 'hook')) { $err.Add("$id`: hook name missing") }
         $kf = AdGet $a 'knownFailure'
         if ($null -ne $kf -and (-not "$(AdGet $kf 'reason' '')".Trim() -or -not "$(AdGet $kf 'ref' '')".Trim())) { $err.Add("$id`: knownFailure needs 'reason' (why it fails) and 'ref' (ledger item or verification note)") }
+        $ktp = if ($null -ne $kf) { $kf.PSObject.Properties['targets'] }   # read directly: AdGet would return [] as $null
+        if ($ktp) {
+            $kt = $ktp.Value
+            if ($null -eq $kt -or -not @($kt).Count -or @(@($kt) | Where-Object { $_ -isnot [string] -or -not $_.Trim() }).Count) { $err.Add("$id`: knownFailure.targets must list target names or patterns (leave it out to cover the whole action)") }
+            if (@('hosts-block', 'preboot-file-edit') -contains $t) { $err.Add("$id`: $t plans one item per action, so its knownFailure cannot list targets; leave targets out") }
+        }
         if ($t -eq 'task-disable') {
             $tp = AdGet $a 'taskPath'
             if ($tp) {
@@ -1074,7 +1143,60 @@ function Write-AdJournal($item) {
 function New-AdItem($a, [string]$prim, [string]$key, [string]$desc, $data, $original, $after) {
     [pscustomobject]@{ ActionId = AdGet $a 'id'; ActionType = AdGet $a 'type'; Prim = $prim; Key = $key; Desc = $desc
                        Data = $data; Original = $original; After = $after; Category = AdGet $a 'category'; Reversible = [bool](AdGet $a 'reversible' $true)
-                       Reapply = [bool](AdGet $a 'reapply' $false); Evidence = AdGet $a 'evidence' }
+                       Reapply = [bool](AdGet $a 'reapply' $false); Evidence = AdGet $a 'evidence'; Known = $null }
+}
+# The object an item changes, named the way an action's target list names it: service name, \Folder\TaskName,
+# file or folder path, exe name, HKLM\Key\Value (reg-set, shellext-block, toast-off), HKLM\Key (deleted keys),
+# program path (firewall), the hook's own item key. knownFailure.targets entries are matched against it.
+function Get-AdItemSubject($it) {
+    $d = $it.Data
+    switch ($it.Prim) {
+        'service' { return $d.name }
+        'task' { return "$($d.path)$($d.name)" }
+        'ifeo' { return $d.name }
+        'regset' { return "$($d.hive)\$($d.sub)\$($d.name)" }
+        'regdel' { return "$($d.hive)\$($d.parent)\$($d.name)" }
+        'firewall' { return $d.program }
+        'hook' { return $it.Key.Substring($it.Key.IndexOf('|') + 1) }
+        { @('file2dir', 'dir2file', 'acl', 'iniset', 'jsonset') -contains $_ } { return $d.path }
+    }
+    $null
+}
+# Registry names are compared in one spelling, the hive as HKLM\ or HKCU\ and no trailing backslash, so a targets
+# entry may copy any spelling Split-AdRegPath accepts (HKEY_CURRENT_USER\, HKCU:\, a trailing \). Others pass as is.
+function ConvertTo-AdKnownName([string]$s) {
+    if ($s -notmatch '^(?i)(HKEY_LOCAL_MACHINE|HKLM:?|HKEY_CURRENT_USER|HKCU:?)\\') { return $s }
+    ($s -replace '^(?i)(HKEY_LOCAL_MACHINE|HKLM:?)\\', 'HKLM\' -replace '^(?i)(HKEY_CURRENT_USER|HKCU:?)\\', 'HKCU\').TrimEnd('\')
+}
+# The knownFailure that covers this item, or $null. Without targets it covers every item of the action; with
+# targets only the items whose subject equals one of them, or matches it when it has wildcards (tokens expanded).
+function Get-AdKnownFailure($it) {
+    $kf = $script:Ad.KnownFailures[$it.ActionId]
+    if (-not $kf) { return $null }
+    if (-not $script:Ad.KnownTargets.ContainsKey($it.ActionId)) { return $kf }
+    $s = ConvertTo-AdKnownName (Get-AdItemSubject $it)
+    if (-not $s) { return $null }
+    foreach ($p in @($script:Ad.KnownTargets[$it.ActionId])) {
+        if ($p -match '[\*\?]') { if ($s -like $p.Replace('[', '`[').Replace(']', '`]')) { return $kf } }
+        elseif ($s -ieq $p) { return $kf }
+    }
+    $null
+}
+function Add-AdKnownFailed([string]$id, $kf) {
+    $script:Ad.KnownFailed++
+    if (-not $script:Ad.KnownBy.Contains($id)) { $script:Ad.KnownBy[$id] = @{ N = 0; Ref = "$(AdGet $kf 'ref')" } }
+    $script:Ad.KnownBy[$id].N++
+}
+# A failed item: a known failure is a WARN counted apart (no diagnostics), anything else a FAIL with diagnostics.
+function Write-AdItemFailure($it, $er) {
+    $msg = $er.Exception.Message
+    if ($it.Known) {
+        Add-AdKnownFailed $it.ActionId $it.Known
+        Say 'WARN' "[$($it.ActionId)] known failure (ref $(AdGet $it.Known 'ref')): $(AdGet $it.Known 'reason') :: $($it.Desc) :: $msg" -NoCount
+    } else {
+        Say 'FAIL' "$($it.Desc) :: $msg"
+        if (Test-AdAccessDenied $er) { Write-AdDenialDiagnostics $it }
+    }
 }
 function Get-AdRegSetItem($a, [string]$hive, $view, [string]$sub, [string]$name, $value, [string]$kind, [string]$desc) {
     $cur = Get-AdRegValue $hive $view $sub $name
@@ -1124,7 +1246,8 @@ function Get-AdActionPlan($a) {
             foreach ($sp in $specs) {
                 $found = @(Get-AdTasks $sp[0] $sp[1] -Recurse:$sp[2] | Where-Object { $_.TaskName -notlike "$($script:Ad.Prefix)Debloat-*" -and $_.TaskPath -notlike '\Microsoft\*' })
                 $where = if ($sp[2]) { "$($sp[0]) and its subfolders" } else { "$($sp[0]) (this folder only; taskPath also searches subfolders)" }
-                Say 'INFO' ("$id`: searched $where for $($sp[1]): $($found.Count) match$(if ($found.Count -ne 1) { 'es' })" + $(if ($found.Count) { " ($((@($found | ForEach-Object { "$($_.TaskPath)$($_.TaskName)" }) | Select-Object -First 5) -join ', '))" } else { '' }))
+                Say 'INFO' ("$id`: searched $where for $($sp[1]): $($found.Count) match$(if ($found.Count -ne 1) { 'es' })" + $(if ($found.Count) { " ($((@($found | ForEach-Object { "$($_.TaskPath)$($_.TaskName)" }) | Select-Object -First 5) -join ', '))" } else { '' }) +
+                    (Get-AdTaskSearchNote $sp[0] $sp[1] $sp[2]))
                 foreach ($f in $found) {
                     if ("$($f.State)" -eq 'Disabled') { Say 'SKIP' "task $($f.TaskPath)$($f.TaskName) already disabled"; continue }
                     $ti = Get-AdTaskIdentity $f
@@ -1466,8 +1589,13 @@ function Invoke-AdItem($it) {
     Write-AdJournal $it
     switch ($it.Prim) {
         'service' {
-            Invoke-AdNative sc.exe @('config', $d.name, 'start=', 'disabled') | Out-Null
-            if ($d.stop -and $it.Original.state -eq 'Running') { try { Stop-Service -Name $d.name -Force -ErrorAction Stop } catch { Say 'WARN' "service $($d.name) disabled but did not stop: $($_.Exception.Message)" } }
+            # Neither failure is thrown: a security-suite veto of sc.exe is often a known failure (see New-AdFailure).
+            $r = Invoke-AdNative sc.exe @('config', $d.name, 'start=', 'disabled') -NoThrow
+            if ($r.Code) { return (New-AdFailure "sc.exe exit $($r.Code): $($r.Out)" $r.Code) }
+            if ($d.stop -and $it.Original.state -eq 'Running') {
+                $ev = $null; Stop-Service -Name $d.name -Force -ErrorAction SilentlyContinue -ErrorVariable ev
+                if (@($ev).Count) { Say 'WARN' "service $($d.name) disabled but did not stop: $(@($ev)[0].Exception.Message)" }
+            }
         }
         'task' { Disable-ScheduledTask -TaskPath $d.path -TaskName $d.name | Out-Null }
         'file2dir' {
@@ -1511,8 +1639,10 @@ function Invoke-AdItem($it) {
             if (-not $done) {
                 $r = Invoke-AdNative reg.exe @('delete', "$($d.hive)\$($d.parent)\$($d.name)", '/f', "/reg:$($d.view)") -NoThrow
                 if ($r.Code) {
+                    # A covered key goes the known-failure way (counted apart); any other key stays a counted WARN.
+                    if ($it.Known) { return (New-AdFailure "cannot delete $($d.hive)\$($d.parent)\$($d.name): reg.exe exit $($r.Code): $($r.Out)" $r.Code) }
                     Say 'WARN' "Cannot delete $($d.hive)\$($d.parent)\$($d.name) (likely owned by TrustedInstaller); left in place"
-                    if (-not $script:Ad.KnownFailures[$it.ActionId]) { Write-AdDenialDiagnostics $it }
+                    Write-AdDenialDiagnostics $it
                     return 'warned'
                 }
             }
@@ -1762,8 +1892,8 @@ function Write-AdDenialDiagnostics($it) {
     Write-Host "  ---- access denied on $($it.Prim) change: diagnostics (read-only) ----" -ForegroundColor Magenta
     switch ($it.Prim) {
         'service' {
-            Write-AdDiagLines "service $($d.name) security descriptor (sc sdshow):" { Invoke-AdNative sc.exe @('sdshow', $d.name) }
-            Write-AdDiagLines "service $($d.name) protection level (sc qprotection):" { Invoke-AdNative sc.exe @('qprotection', $d.name) }
+            Write-AdDiagLines "service $($d.name) security descriptor (sc sdshow):" { Get-AdNativeLines sc.exe @('sdshow', $d.name) }
+            Write-AdDiagLines "service $($d.name) protection level (sc qprotection):" { Get-AdNativeLines sc.exe @('qprotection', $d.name) }
         }
         { @('regset', 'regdel', 'ifeo') -contains $_ } {
             $sub = switch ($it.Prim) { 'regset' { $d.sub } 'regdel' { "$($d.parent)\$($d.name)" } 'ifeo' { "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$($d.name)" } }
@@ -1788,7 +1918,7 @@ function Write-AdDenialDiagnostics($it) {
     # Machine-wide facts, once per run.
     if (-not $script:Ad.Shown.ContainsKey('denial-machine')) {
         $script:Ad.Shown['denial-machine'] = 1
-        if (Test-AdIsAdmin) { Write-AdDiagLines 'loaded file system minifilters (fltmc filters):' { Invoke-AdNative fltmc.exe @('filters') } }
+        if (Test-AdIsAdmin) { Write-AdDiagLines 'loaded file system minifilters (fltmc filters):' { Get-AdNativeLines fltmc.exe @('filters') } }
         else { Write-Host '  loaded file system minifilters: not listed (fltmc needs elevation)' -ForegroundColor Magenta }
         Write-AdDiagLines 'installed antivirus (SecurityCenter2):' {
             $ev = $null
@@ -1798,7 +1928,8 @@ function Write-AdDenialDiagnostics($it) {
         }
     } else { Write-Host '  (minifilters and antivirus: listed above)' -ForegroundColor Magenta }
     Write-Host '  A security suite can veto a change per item even when the permissions allow it. Do not work around it:' -ForegroundColor Magenta
-    Write-Host '  record it in the manifest as knownFailure {reason, ref} and use another lever (reference/levers.md).' -ForegroundColor Magenta
+    Write-Host '  record it in the manifest as knownFailure {reason, ref} (add targets to cover only this item) and use another' -ForegroundColor Magenta
+    Write-Host '  lever (reference/levers.md).' -ForegroundColor Magenta
 }
 
 # ------------------------------------------------------------------ install / uninstall
@@ -1813,11 +1944,12 @@ function Register-AdWatchTask([string]$installed) {
     Register-ScheduledTask -TaskName $script:Ad.WatchTask -Action $act -Trigger @($logon, $every) -Principal $pri -Settings $set -Force `
         -Description "AppDebloat $($script:Ad.AppId): re-confirms blocking actions at logon and every 6 hours" | Out-Null
 }
-# Files this tool writes into its state folder; anything else found there is left in place.
+# Files this tool writes into its state folder (elevated-tasks.json comes from scripts/elevated_readonly.ps1 -Key);
+# anything else found there is left in place.
 function Remove-AdStateFiles([switch]$KeepRestore) {
     $dir = $script:Ad.StateDir
     if (-not (Test-Path -LiteralPath $dir)) { return }
-    $own = @('journal.jsonl', 'options.json', 'state.json', 'auto.log', 'history.log', 'regkeys', 'backup', "$($script:Ad.Prefix)Debloat.ps1")
+    $own = @('journal.jsonl', 'options.json', 'state.json', 'auto.log', 'history.log', 'regkeys', 'backup', 'elevated-tasks.json', "$($script:Ad.Prefix)Debloat.ps1")
     foreach ($f in @(Get-ChildItem -LiteralPath $dir -Force)) {
         $mine = ($own -contains $f.Name) -or ($f.Name -like 'preboot-*.ps1') -or ($f.Name -like '*.adtmp') -or
                 (-not $KeepRestore -and ($f.Name -like 'restore-*.ps1' -or $f.Name -eq 'preboot.log'))
@@ -1923,7 +2055,8 @@ function Invoke-AppDebloat {
                     Manifest = $m; Vars = @{}; Root = $null; Ver = $null; Uninstall = $null; KeepState = $false; Options = $Options
                     Bases = (New-Object System.Collections.Generic.List[string]); RealBases = @{}; CoreFiles = @(); PreserveFiles = @(); CoreProcs = @(); CoreSvcs = @(); Restartable = @()
                     JournalKeys = @{}; Version = $null; AppId = 'unknown'; StateDir = $null; Mode = $Mode; ModMap = $null
-                    Shown = @{}; IgnoreUninspectable = @(); KnownFailures = @{}; KnownFailed = 0; TaskCacheOn = $false; TaskCache = $null }
+                    Shown = @{}; IgnoreUninspectable = @(); KnownFailures = @{}; KnownTargets = @{}; KnownFailed = 0; KnownBy = [ordered]@{}
+                    TaskCacheOn = $false; TaskCache = $null; SavedTasks = $null; IsAdmin = (Test-AdIsAdmin) }
     try { Test-AdManifest $m } catch { Say 'FAIL' $_.Exception.Message; return 2 }
     foreach ($x in @($IgnoreUninspectable | Where-Object { "$_".Trim() })) {
         $x = "$x".Trim() -replace '(?i)\.exe$', ''
@@ -1931,7 +2064,12 @@ function Invoke-AppDebloat {
         $Ad.IgnoreUninspectable += [pscustomobject]@{ Pattern = $x; Source = '-IgnoreUninspectable' }
     }
     foreach ($x in @(AdGet $m 'checkLoadedExempt' @())) { $Ad.IgnoreUninspectable += [pscustomobject]@{ Pattern = ("$x".Trim() -replace '(?i)\.exe$', ''); Source = 'manifest checkLoadedExempt' } }
-    foreach ($a in @(AdGet $m 'actions' @())) { $kf = AdGet $a 'knownFailure'; if ($kf) { $Ad.KnownFailures[(AdGet $a 'id')] = $kf } }
+    foreach ($a in @(AdGet $m 'actions' @())) {
+        $kf = AdGet $a 'knownFailure'; if (-not $kf) { continue }
+        $Ad.KnownFailures[(AdGet $a 'id')] = $kf
+        $ktp = $kf.PSObject.Properties['targets']
+        if ($ktp) { $Ad.KnownTargets[(AdGet $a 'id')] = @(@($ktp.Value) | ForEach-Object { "$_" }) }   # tokens expanded below
+    }
     $Ad.AppId = $m.id; $Ad.Name = $m.name; $Ad.Prefix = $m.taskPrefix
     $Ad.StateDir = Join-Path $env:ProgramData "AppDebloat\$($m.id)"
     $Ad.JournalPath = Join-Path $Ad.StateDir 'journal.jsonl'
@@ -1960,6 +2098,9 @@ function Invoke-AppDebloat {
             $Ad.Vars[$p.Name] = Get-AdNormal (Expand-AdPath $val)
         }
         foreach ($b in @(AdGet $m 'allowedRoots' @())) { [void](Add-AdBase (Get-AdNormal (Expand-AdPath $b)) "allowedRoots entry '$b'") }
+        foreach ($k in @($Ad.KnownTargets.Keys)) {
+            try { $Ad.KnownTargets[$k] = @($Ad.KnownTargets[$k] | ForEach-Object { ConvertTo-AdKnownName (Expand-AdPath $_) }) } catch { throw "knownFailure.targets of ${k}: $($_.Exception.Message)" }
+        }
         $core = AdGet $m 'core'
         $Ad.CoreFiles = @(); foreach ($f in @(AdGet $core 'files' @())) { foreach ($x in (Resolve-AdTargets $f)) { $Ad.CoreFiles += (Get-AdNormal $x) } }
         $Ad.PreserveFiles = @(); foreach ($f in @(AdGet $core 'preserve' @())) { foreach ($x in (Resolve-AdTargets $f)) { $Ad.PreserveFiles += (Get-AdNormal $x) } }
@@ -2043,21 +2184,28 @@ function Invoke-AppDebloat {
         }
         if ($w -and -not $Options[$w]) { continue }
         if ($u -and $Options[$u]) { continue }
-        $kf = $Ad.KnownFailures[(AdGet $a 'id')]; if ($kf) { $known.Add($a) }
-        try { foreach ($it in (Get-AdActionPlan $a)) { $items.Add($it) } }
+        $aid = AdGet $a 'id'; $kf = $Ad.KnownFailures[$aid]; if ($kf) { $known.Add($a) }
+        try { foreach ($it in (Get-AdActionPlan $a)) { $it.Known = Get-AdKnownFailure $it; $items.Add($it) } }
         catch {
-            if ($kf) { $Ad.KnownFailed++; Say 'WARN' "[$(AdGet $a 'id')] known failure (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason') :: $($_.Exception.Message)" }
-            else { Say 'FAIL' "$(AdGet $a 'id'): $($_.Exception.Message)" }
+            # A failure before any item exists is known only under the whole-action form: targets cannot name it.
+            if ($kf -and -not $Ad.KnownTargets.ContainsKey($aid)) {
+                Add-AdKnownFailed $aid $kf
+                Say 'WARN' "[$aid] known failure (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason') :: $($_.Exception.Message)" -NoCount
+            }
+            else { Say 'FAIL' "${aid}: $($_.Exception.Message)" }
         }
     }
     $Ad.TaskCacheOn = $false; $Ad.TaskCache = $null
+    $knownItems = @($items | Where-Object { $_.Known }).Count
+    $knownText = if ($knownItems) { ", $knownItems of them known to fail" } else { '' }
     Write-Host ''
-    Write-Host ("Plan: {0} change(s)" -f $items.Count)
+    Write-Host ("Plan: {0} change(s){1}" -f $items.Count, $knownText)
     $n = 0
     foreach ($it in $items) {
         $n++
         Write-Host ('  {0,3}. [{1}] {2}' -f $n, $it.ActionId, $it.Desc) -ForegroundColor Yellow
-        Write-Host ('       {0}, {1}, evidence {2}{3}' -f $it.ActionType, $it.Category, $it.Evidence, $(if ($it.Reapply) { ', reapply' } else { '' })) -ForegroundColor DarkGray
+        Write-Host ('       {0}, {1}, evidence {2}{3}{4}' -f $it.ActionType, $it.Category, $it.Evidence, $(if ($it.Reapply) { ', reapply' } else { '' }),
+            $(if ($it.Known) { ", known to fail (ref $(AdGet $it.Known 'ref'))" } else { '' })) -ForegroundColor DarkGray
     }
     if ($inactive.Count) {
         Write-Host ''
@@ -2068,26 +2216,29 @@ function Invoke-AppDebloat {
     # A recorded, explained failure is named on every run, so it is neither forgotten nor mistaken for a new one.
     if ($known.Count) {
         Write-Host ''
-        Write-Host ("Known Failures: {0} action(s) carry a recorded failure (logged as WARN, not counted as failures)" -f $known.Count)
-        foreach ($a in $known) { $kf = $Ad.KnownFailures[(AdGet $a 'id')]; Say 'WARN' "[$(AdGet $a 'id')] knownFailure (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason')" }
+        Write-Host ("Known Failures: {0} action(s) carry a recorded failure (logged as WARN, counted apart from failures and warnings)" -f $known.Count)
+        foreach ($a in $known) {
+            $aid = AdGet $a 'id'; $kf = $Ad.KnownFailures[$aid]
+            $for = if ($Ad.KnownTargets.ContainsKey($aid)) { " for $(@(AdGet $kf 'targets') -join ', ')" } else { '' }
+            Say 'WARN' "[$aid] knownFailure$for (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason')" -NoCount
+        }
     }
     Write-Host ''
     $apply = ($Mode -ne 'Plan')
     if ($apply -and $items.Count) {
         foreach ($it in $items) {
-            $kf = $Ad.KnownFailures[$it.ActionId]
+            # A step reports failure by throwing or by returning New-AdFailure; both end in Write-AdItemFailure.
+            $er = $null
             try {
                 $r = Invoke-AdItem $it
-                if (@($r) -contains 'warned') { continue }      # WARN-only steps are not changes
-                $Ad.Changes++; Say 'OK' $it.Desc
-                if ($kf) { Say 'INFO' "[$($it.ActionId)] has knownFailure (ref $(AdGet $kf 'ref')) but this item succeeded; remove knownFailure from the manifest once it stays fixed" }
-            } catch {
-                if ($kf) { $Ad.KnownFailed++; Say 'WARN' "[$($it.ActionId)] known failure (ref $(AdGet $kf 'ref')): $(AdGet $kf 'reason') :: $($it.Desc) :: $($_.Exception.Message)" }
-                else {
-                    Say 'FAIL' "$($it.Desc) :: $($_.Exception.Message)"
-                    if (Test-AdAccessDenied $_) { Write-AdDenialDiagnostics $it }
+                $er = Get-AdFailure $r
+                if (-not $er) {
+                    if (@($r) -contains 'warned') { continue }      # WARN-only steps are not changes
+                    $Ad.Changes++; Say 'OK' $it.Desc
+                    if ($it.Known) { Say 'INFO' "[$($it.ActionId)] knownFailure (ref $(AdGet $it.Known 'ref')) covers this item but it succeeded; remove it from the manifest once it stays fixed" }
                 }
-            }
+            } catch { $er = $_ }
+            if ($er) { Write-AdItemFailure $it $er }
         }
     }
     if ($Mode -eq 'Install') {
@@ -2116,11 +2267,13 @@ function Invoke-AppDebloat {
         [IO.File]::WriteAllText($statePath, ([ordered]@{ fingerprint = $fingerprint; lastRun = (Get-Date -Format s); engine = $script:AdEngineVersion } | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
     }
     if ($Mode -eq 'Auto') {
+        # One compact line: known failures by action id and count (their full text is in auto.log), then other WARNs.
+        $kb = if ($Ad.KnownBy.Count) { ' [' + ((@($Ad.KnownBy.Keys) | ForEach-Object { "$_ x$($Ad.KnownBy[$_].N), ref $($Ad.KnownBy[$_].Ref)" }) -join '; ') + ']' } else { '' }
         $warn = if ($Ad.WarnLines.Count) { ' WARN: ' + (($Ad.WarnLines | Select-Object -Unique) -join ' | ') } else { '' }
-        Write-AdHistory ("{0}: {1} change(s), {2} failure(s), {3} known failure(s){4}" -f $fingerprint, $Ad.Changes, $Ad.Failures, $Ad.KnownFailed, $warn)
+        Write-AdHistory ("{0}: {1} change(s), {2} failure(s), {3} known failure(s){4}{5}" -f $fingerprint, $Ad.Changes, $Ad.Failures, $Ad.KnownFailed, $kb, $warn)
         & $stopLog
     }
-    if (-not $apply) { Write-Host "$($items.Count) change(s) planned. Run again with -Apply in an elevated PowerShell to execute exactly this plan." }
+    if (-not $apply) { Write-Host "$($items.Count) change(s) planned$knownText. Run again with -Apply in an elevated PowerShell to execute exactly this plan." }
     else {
         Write-Host "$($Ad.Changes) change(s) made, $($Ad.Warnings) warning(s), $($Ad.Failures) failure(s), $($Ad.KnownFailed) known failure(s)."
         if (@($items | Where-Object { $_.Prim -eq 'preboot' })) { Write-Host 'Reboot: a pre-logon settings edit is scheduled.' }

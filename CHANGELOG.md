@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here (Keep a Changelog style).
 
+## [0.1.5] - 2026-11-23
+### Changed
+- Round-3 live feedback: non-elevated task searches say SYSTEM tasks are invisible and show the last elevated enumeration (elevated_readonly -Key); per-target knownFailure (registry hive spellings normalized, regdel covered); dry run counts changes known to fail; compact history.log line; sc.exe denials no longer appear as TerminatingError; shot_windows lists minimized windows and never restores them; weaker P6 pass; JSON files written with ConvertTo-Json -Compress or json.dumps, never heredocs.
+
 ## [0.1.4] - 2026-11-21
 ### Changed
 - Improvements from the first live apply/verify/install runs: recursive taskPath matching with visible search counts, knownFailure, access-denied diagnostics, -Install registers only after a clean apply, quiet existence lookups, module-check exemptions for isolated security and VM processes plus -IgnoreUninspectable/checkLoadedExempt, unused-option warnings; snapshot_diff case-insensitive paths and --journal/--expect-removed; list_modules.ps1; prior task state in elevated_readonly; docs on security-suite vetoes and no third-party database copies.

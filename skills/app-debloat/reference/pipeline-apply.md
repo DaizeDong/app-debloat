@@ -6,7 +6,7 @@ Continues `pipeline.md` (evidence rules and the read-only stages P0 to P3). Same
 
 Several steps need Administrator: the elevated read-only bundle at P0, `-Apply`, `-Install`, `-Uninstall`, and some P6 checks. A UAC prompt nobody answers times out after about two minutes and reads as "canceled by the user".
 
-1. Ask for elevation only when the owner is present, and batch the elevated work so one prompt covers it (P0: `scripts/elevated_readonly.ps1`; P6: apply plus its checks).
+1. Ask for elevation only when the owner is present, and batch the elevated work so one prompt covers it (P0: `scripts/elevated_readonly.ps1 -Key <manifest id>`, the id the built script will use; drop `-Key` under a read-only instruction or a write restriction, see `safety.md` §8. P6: apply plus its checks).
 2. If UAC is declined or times out, retry at most once.
 3. Then stop after the dry run. Write the exact elevated command block into `verification.md` (working directory, script path, mode switches, option switches, where its output goes) so the owner can paste it into an elevated terminal, and mark every elevated step `proposed`, not `performed`.
 
@@ -42,7 +42,7 @@ Steps:
 2. Build the single-file script: dot-source `scripts/DebloatEngine.ps1`, then `New-AppScript -ManifestPath <manifest.json> -HooksPath <hooks.ps1> -OutFile <App>Debloat.ps1 -EnginePath <path to DebloatEngine.ps1>`. It inlines the engine (path guard, placeholder, IFEO, Blocked, ACL, service, task, firewall, ini and json settings, journal, preboot task, install and uninstall), the manifest and the hooks into `templates/app-debloat.template.ps1`, so users download one file.
 3. Modes: dry run by default (prints the plan, changes nothing), `-Apply` (exactly the printed plan, journals original state on first touch), `-Install` (admin-only state dir, logon plus 6-hourly task, applies once), `-Uninstall` (removes what it registered, replays the journal). Exactly one mode switch per run.
 4. Save as UTF-8 with BOM, target Windows PowerShell 5.1.
-5. Run the dry run as the user. If `-Apply` cannot be elevated, follow the elevation rule above and stop here.
+5. Run the dry run as the user. A non-elevated dry run cannot see SYSTEM tasks, so a task search there can read 0 matches for tasks that exist. `elevated_readonly.ps1 -Key <manifest id>` saves its elevated task list to `%ProgramData%\AppDebloat\<id>\elevated-tasks.json`, and the dry run reports that list's match count and date next to the live one; rerun it after the vendor adds or changes tasks. If `-Apply` cannot be elevated, follow the elevation rule above and stop here.
 
 Exit: dry run on the target machine prints the expected plan; a second `-Apply` reports only SKIP (or the elevated command block is handed over).
 Artifacts: `<app>-debloat.ps1`.
@@ -53,7 +53,9 @@ Goal: prove by behavior that bloat is gone and the contract holds.
 
 Steps:
 1. Before and after: process tree, loaded modules per host, outbound connections (Sysmon 3 and 22, `scripts/launch_monitor.ps1`, or a live snapshot).
-2. Screenshots of the app's own windows with `scripts/shot_windows.ps1 -Root <root> -Out <private dir>` (DPI-aware PrintWindow, no input sent). Never photograph the whole desktop.
+2. Screenshots of the app's own windows with `scripts/shot_windows.ps1 -Root <root> -Out <private dir>` (DPI-aware PrintWindow, no input sent). Never photograph the whole desktop. A minimized window cannot paint: the index lists it with `minimized: true` and its restored size (none when `restores_maximized: true`), and it is not captured, because restoring the owner's window would be input. When the app's only window is minimized, pick one:
+   - Stronger: open a new window yourself through the app's own command line or entry point (the launch command recorded at P1, or a documented switch such as a new-window flag), then run `shot_windows.ps1` again and capture that window. If the app is single-instance, relaunching it restores the owner's window: do not relaunch; take the weaker pass, or ask the owner to open a window.
+   - Weaker: record "process up + window present (minimized)" as a `VER` entry anchored on the index line (title, class, restored size or "restores maximized"), and write in `verification.md` that the window's content was not seen. It does not pass a contract probe that needs the window's content.
 3. Run every contract probe. Keystroke probes go only into a window the agent created; verify foreground and read back committed text (see `safety.md`).
 4. Reboot and repeat. Then trigger the app's own repair or update path once and repeat.
 5. Delayed re-read after a few minutes and after reboot: IFEO, Blocked and ACL changes still present (AV may revert them).

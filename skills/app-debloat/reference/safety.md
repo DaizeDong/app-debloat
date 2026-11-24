@@ -41,6 +41,7 @@ These are not optional. If a step would break one, stop and record it in the led
 - Send keystrokes only into a window the agent created (its own WinForms text box or test app). Never into the user's windows.
 - Check the target's integrity level (UIPI silently drops input to higher-integrity windows) and verify `GetForegroundWindow` before every batch.
 - Judge by read-back of committed text (UI Automation value or clipboard), never by "SendInput returned success".
+- Never restore, activate, move or click the owner's windows to capture or probe them, a minimized one included. To see the app's UI, open a new window through the app's own command line, or record the weaker "window present (minimized)" pass (`pipeline-apply.md`, P6).
 
 ## 6. Reverse Engineering Hygiene
 
@@ -54,11 +55,12 @@ These are not optional. If a step would break one, stop and record it in the led
 - The `-Install` task re-asserts blocking actions only: gates off, placeholders, service and task disable, firewall, IFEO, Blocked. Never resets, never overwrites user settings it did not originally change, never deletes newly appearing user data.
 - Install the task only after P6 passes.
 - Original state is captured on first touch only; later runs never overwrite the journal's originals.
-- The installed script lives in an admin-only state directory under `%ProgramData%`. The task never downloads code.
+- The installed script lives in an admin-only state directory under `%ProgramData%`. The task never downloads code. `elevated_readonly.ps1 -Key` creates that directory with the same permissions (refusing a reparse point there) and writes only `elevated-tasks.json` into it.
 
 ## 8. Restricted Runs
 
 - When a task restricts writes to one folder, every helper script, scratch file, capture, log and generated output goes inside that folder too. Session scratch directories, `%TEMP%` and the user profile count as outside. If a tool cannot be pointed there, do not run it and record why.
+- Under a read-only instruction or a one-folder write restriction, run `elevated_readonly.ps1` without `-Key` (it writes under `%ProgramData%`); an abandoned run leaves that folder, delete it by hand.
 - Under a read-only instruction, stop no process at all: not the app's, not a shell host, and not background tasks you started yourself (traces, captures, long scans). Let them finish or time out, and plan their timeouts before starting them.
 - Outside a read-only run, a toggle test may stop the target app, and only the target app, with `scripts/stop_app.ps1 -Root <root> -Confirm` (by full path, then PID; services are skipped unless `-IncludeServices`). Record survivors it reports instead of escalating. A forced stop can make the app offer to restore pages or sessions on the next start; that is expected.
 - Toggle tests are journaled: run them through the built script or record the backup path in the ledger, so the change can be undone.
