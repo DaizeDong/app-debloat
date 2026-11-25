@@ -1,17 +1,17 @@
-# Profile: input method (IME)
+# Profile: Input Method (IME)
 
 Third-party pinyin and other CJK IMEs (Sogou, QQ Pinyin, Baidu, iFlytek and similar). The worked example for this profile is the public Sogou recipe (`sogou-ime-debloat`: `SogouDebloat.ps1`, `docs/how-it-works.md`); its offsets are version specific, the structure generalizes.
 
-## Architecture and where the junk lives
+## Architecture and Where the Junk Lives
 
-- **The IME itself is a DLL loaded into every process that takes text input.** A TSF text service registered as a COM in-proc server (`HKCR\CLSID\{clsid}\InProcServer32`, plus `Wow6432Node` for x86) and as a TSF profile (`HKLM\SOFTWARE\Microsoft\CTF\TIP\{clsid}`). Usually two builds: x64 and x86, either in the install root or in `System32` / `SysWOW64`. `ctfmon.exe` hosts the language bar side.
-- **AppContainer broker.** Sandboxed apps get the IME through a vendor COM broker exe (Sogou: `SogouImeBroker.exe`). Typing in Store apps, Settings and some browsers depends on it.
-- **Daemons around the core.** Command or tool server (settings UI, dictionary merge), cloud candidate process, account sync, skin and emoji downloaders, toolbox, AI assistant, "pet", game center, news and toast popups, PDF or browser bundles. These are where ads, AI add-ons and popups live.
-- **Component manager.** A loader inside the IME DLL reads a component table and `LoadLibrary`s plug-in bundles; a separate manager exe downloads missing components (Sogou: `ComponentConfig.ini` + `SogouComMgr.exe`).
-- **Third-party SDKs inside daemons.** Telemetry and ad SDKs loaded dynamically (Sogou daemons load `beacon_sdk.dll`, `qimei.dll`, `libamssdk.dll`, `shiply.dll`). Thread start addresses and loaded-module lists show them.
-- **Telemetry in the IME DLL itself.** Pingback URLs referenced from the `.ime`. These requests come from the host process (Notepad, a browser), so a per-program firewall rule cannot separate them.
+- **The IME Itself Is a DLL Loaded into Every Process That Takes Text Input.** A TSF text service registered as a COM in-proc server (`HKCR\CLSID\{clsid}\InProcServer32`, plus `Wow6432Node` for x86) and as a TSF profile (`HKLM\SOFTWARE\Microsoft\CTF\TIP\{clsid}`). Usually two builds: x64 and x86, either in the install root or in `System32` / `SysWOW64`. `ctfmon.exe` hosts the language bar side.
+- **AppContainer Broker.** Sandboxed apps get the IME through a vendor COM broker exe (Sogou: `SogouImeBroker.exe`). Typing in Store apps, Settings and some browsers depends on it.
+- **Daemons Around the Core.** Command or tool server (settings UI, dictionary merge), cloud candidate process, account sync, skin and emoji downloaders, toolbox, AI assistant, "pet", game center, news and toast popups, PDF or browser bundles. These are where ads, AI add-ons and popups live.
+- **Component Manager.** A loader inside the IME DLL reads a component table and `LoadLibrary`s plug-in bundles; a separate manager exe downloads missing components (Sogou: `ComponentConfig.ini` + `SogouComMgr.exe`).
+- **Third-Party SDKs Inside Daemons.** Telemetry and ad SDKs loaded dynamically (Sogou daemons load `beacon_sdk.dll`, `qimei.dll`, `libamssdk.dll`, `shiply.dll`). Thread start addresses and loaded-module lists show them.
+- **Telemetry in the IME DLL Itself.** Pingback URLs referenced from the `.ime`. These requests come from the host process (Notepad, a browser), so a per-program firewall rule cannot separate them.
 
-## Launch, persistence and re-install vectors
+## Launch, Persistence and Re-Install Vectors
 
 - Activation of the IME in any app spawns daemons (not Run keys); killing them just triggers a respawn on the next keystroke.
 - Periodic dispatch from the IME or the tool server: updater, component upgrade, remote task table ("everyhourtask"-style lists from the server that name exes to run).
@@ -22,7 +22,7 @@ Third-party pinyin and other CJK IMEs (Sogou, QQ Pinyin, Baidu, iFlytek and simi
 
 ## Gates
 
-| Gate | Typical form | Notes |
+| Gate | Typical Form | Notes |
 |---|---|---|
 | Global component table | ini under the install root, often base64 + AES (Sogou: AES-256-CBC, key is a constant in the vendor binary) | The real load switch. Per-component `enable` plus a bundle-level `forceenable`. Never ship the key; derive it at runtime from the user's own install (known-plaintext on the second CBC block) and keep it in memory only. |
 | User settings | `HKCU\Software\<Vendor>*` values, `%USERPROFILE%\AppData\LocalLow\<Vendor>\<id>\*.ini` | Often only hide the UI entry; the component still loads. Missing value can mean "on", so write 0, do not delete. LocalLow because the IME runs inside low-integrity hosts. |
@@ -30,7 +30,7 @@ Third-party pinyin and other CJK IMEs (Sogou, QQ Pinyin, Baidu, iFlytek and simi
 | Server switches | Remote config SDK, popup and task lists fetched hourly | Verify behavior (process, module, connection), not file state. Test what happens when the fetch fails. |
 | Signature checks | Before launching helpers and before `LoadLibrary` of components | Another reason not to patch binaries. Never set a vendor "no check signature" registry relaxation. |
 
-## Core: do not touch
+## Core: Do Not Touch
 
 - The `.ime` / TSF DLLs (both bitnesses), their CLSID and TIP registration, and the TSF profile in the user's language list.
 - The AppContainer broker exe.
@@ -58,13 +58,13 @@ Avoid:
 - Editing user settings while host processes hold the shared block.
 - Firewall rules meant for the IME DLL: they would hit the host app.
 
-## Integrity, anti-tamper and ban risk
+## Integrity, Anti-Tamper and Ban Risk
 
 - Ban risk: low. Accounts are optional (dictionary sync). Tier: normal, after the integrity probe.
 - Integrity: component certificate checks and helper signature checks exist; placeholders do not trip them because nothing signed is modified.
 - Privacy history to mention in the analysis: cloud conversion that uploaded typed text by default (Baidu IME Japan, 2013: https://ja.wikipedia.org/wiki/Baidu_IME).
 
-## Verification probes
+## Verification Probes
 
 The probe must never type into a window the agent did not create.
 
@@ -77,7 +77,7 @@ The probe must never type into a window the agent did not create.
 7. After reboot: repeat 1 to 6, then list modules in the test process (expect only the core IME DLLs and resources) and list vendor processes and their threads (helper SDK threads gone).
 8. Optional AppContainer check (Store app text box) only if the owner accepts the agent focusing that app; otherwise verify the broker process starts on demand.
 
-## Public projects and recipes
+## Public Projects and Recipes
 
 - Sogou worked example (method public, key derived at runtime): `sogou-ime-debloat` (`docs/how-it-works.md`).
 - Lock-not-delete against Sogou self-repair: https://www.v2ex.com/t/678665 and https://github.com/ArabidopsisDev/SogouFucker (ACL deny and an undeletable placeholder in `%TEMP%\sgrepairbackup`).

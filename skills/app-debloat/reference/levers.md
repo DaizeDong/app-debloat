@@ -122,7 +122,7 @@ Add the extension CLSID under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sh
 - Pitfalls:
   - Only vendor-specific names. Never generic names (`crashrpt.exe`, `update.exe`, `pdfsdk.exe`) or any system, security or accessibility binary.
   - If a `Debugger` value already exists, leave it and warn.
-  - Target: a nonexistent path makes creation fail cleanly (used in the Sogou case); a benign signed stub is the alternative when an AV product treats the missing target as suspicious. Pick one per app and record why.
+  - Target: `ifeo-block` points `Debugger` at a path that never exists, so creation fails cleanly (as in the Sogou case). The engine has no signed-stub target; when an AV product treats the missing target as suspicious and removes the key, record that and use another lever for that name.
   - Does not stop `LoadLibrary`. DLLs still need placeholders.
   - Re-read after a delay and after reboot to catch silent AV removal.
 
@@ -168,7 +168,7 @@ How the levers above answer the hijacks the cross-app sweep finds (`pipeline.md`
 
 **Inbound Block for P2P.** A BitTorrent, PCDN or upload-sharing engine listening on all interfaces, often opened up by vendor inbound allow rules on every profile. Lever: `firewall-block-program` with `"direction": "Inbound"` on each exe that listens and each exe a vendor inbound rule names (read the rule's program). The block wins over the vendor's allow rules, outbound transfers keep working, and loopback listeners are not touched. Peers can no longer connect in, so seeding to them stops. Never block outbound on the transfer host: core transfers die. Mappings the engine already requested by UPnP stay on the router until they expire or the router restarts; remove them there. Promote to a default only after the owner's transfer test passes with it applied (`pipeline.md` P1 step 6). The in-app P2P upload switch, where it is plain, is the narrower first choice.
 
-**Overlay Removal.** Explorer uses only the first 15 overlay identifiers in name order, and Windows takes some of them, so a vendor that names its identifiers with leading spaces pushes other apps' sync icons out. Lever: `reg-delete-key` on the app's `ShellIconOverlayIdentifiers` subkeys in both views (one action per view, `match` on the names or `matchDefault` on the CLSIDs), plus `shellext-block` on the CLSIDs so a re-registration does not load. It takes effect after Explorer restarts, which the engine does not do: the owner signs out or restarts Explorer. Check the inventory `shell_ext` rank afterwards. Keep the overlays when the owner uses the vendor's sync folder.
+**Overlay Removal.** Explorer has 15 overlay slots and Windows keeps 4, so only the first 11 handlers that load, in identifier name order, get an overlay; a vendor that names its identifiers with leading spaces pushes other apps' sync icons out. Lever: `reg-delete-key` on the app's `ShellIconOverlayIdentifiers` subkeys in both views (one action per view, `match` on the names or `matchDefault` on the CLSIDs), plus `shellext-block` on the CLSIDs so a re-registration does not load. It takes effect after Explorer restarts, which the engine does not do: the owner signs out or restarts Explorer. Check the inventory `shell_ext` rank afterwards. Keep the overlays when the owner uses the vendor's sync folder.
 
 **Native Messaging Host.** A key `Software\<browser vendor>\<browser>\NativeMessagingHosts\<name>` (HKCU, HKLM, and WOW6432Node with `view: 32`) whose default value names a manifest JSON, which names the host exe. Lever: `reg-delete-key` with `reapply`, `matchDefault` on the manifest path. An app that rewrites the key at every launch makes that a race the watch task loses, so placeholder the target instead: `file-placeholder-dir` on the manifest JSON (the rewritten key then points at a folder, and the browser cannot start the host) or on the host exe. Probe once that the app starts cleanly with the placeholder, then promote.
 
@@ -188,7 +188,7 @@ Binary patching (`ret` a popup routine), injected bypass DLLs, signature-check b
 
 ## Choosing Quickly
 
-| Goal | First choice | Add if needed |
+| Goal | First Choice | Add If Needed |
 |---|---|---|
 | Component loaded by the app | Config gate off | Placeholder on its DLL dir |
 | Bloat exe spawned by core | Placeholder | IFEO by name |

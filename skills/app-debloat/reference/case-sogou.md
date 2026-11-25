@@ -1,4 +1,4 @@
-# Worked example: Sogou Pinyin 15.5
+# Worked Example: Sogou Pinyin 15.5
 
 Public repo: https://github.com/SanJerry007/sogou-ime-debloat (`SogouDebloat.ps1`, `docs/how-it-works.md`). Analyzed on build 15.5.0.2004; offsets below are for that build only. This summary contains no key material and no decrypted config.
 
@@ -17,7 +17,7 @@ Public repo: https://github.com/SanJerry007/sogou-ime-debloat (`SogouDebloat.ps1
 - Shell extension (`biz_shellext`), PDF suite under `%LOCALAPPDATA%`, a preview handler, toast registrations.
 - Injection: `SogouTSF.ime` and `SogouPY.ime` in every input host. Their own network calls cannot be separated by per-program firewall rules.
 
-## P2 Launch chain and gates
+## P2 Launch Chain and Gates
 
 Shape:
 
@@ -38,7 +38,7 @@ TSF shell -> IME core (in every host)
 - Server-pushed switches: a Tencent remote-config SDK fetched by the business launcher can enable popups regardless of user settings, which is why verification is by behavior.
 - Signature checks exist before spawning helpers and before loading component DLLs, which is one reason no binary was patched.
 
-## P3 Re-install paths
+## P3 Re-Install Paths
 
 1. `SogouSvc`: the only no-UAC writer of the install directory; all repair and upgrade goes through it.
 2. Component manager: re-downloads a component whose file is missing while `enable=1`, about every 8 hours, and rewrites the component config on upgrade.
@@ -46,7 +46,7 @@ TSF shell -> IME core (in every host)
 
 New versions install into a new version directory, so path-based blocks alone do not survive upgrades.
 
-## P4 Plan and levers
+## P4 Plan and Levers
 
 | Target | Lever |
 |---|---|
@@ -63,7 +63,7 @@ Kept as core: IME DLLs, broker, `SGTool.exe` (looked like bloat, carries diction
 
 Residual: one context-menu reference under a TrustedInstaller-owned key could not be removed; it points to a deleted and blocked CLSID, so it is inert. Telemetry pings inside the IME DLL itself remain (would need DNS-level blocking of vendor-specific hosts or patching; neither done).
 
-## SDK DLL removal with evidence
+## SDK DLL Removal with Evidence
 
 - SGTool dynamically loads a beacon telemetry SDK and a device-ID SDK. Before: 49 threads, 33 with start addresses in the beacon DLL and 4 in the device-ID DLL.
 - Neither DLL appears in any vendor binary's import or delay-import table, and SGTool checks the load result and takes a fallback branch.
@@ -78,11 +78,11 @@ Residual: one context-menu reference under a TrustedInstaller-owned key could no
 
 Module lists per host, process list, thread counts, typing in three app types after reboot, settings dialog. Processes holding old component DLLs need a reboot and a second `-Apply` to finish.
 
-## P7 Keep applied
+## P7 Keep Applied
 
 `-Install` copies the script and chosen options to an admin-only `%ProgramData%` state dir and registers a task at logon and every 6 hours that runs a logged `-Apply` (all SKIP when nothing changed). It finds the new version directory from the registry after upgrades. It never downloads code. `-Uninstall` removes tasks, IFEO keys, firewall rules and the state dir; placeholders are listed in the log for manual removal before a reinstall.
 
-## What the generic skill takes from this case
+## What the Generic Skill Takes from This Case
 
 - The settings UI is rarely the gate; find the config the loader reads.
 - Placeholders plus IFEO cover both the current path and future version directories.

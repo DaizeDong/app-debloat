@@ -1,8 +1,8 @@
-# Profile: OEM hardware utilities
+# Profile: OEM Hardware Utilities
 
 PC-maker control centers: Lenovo Legion Zone / Vantage / Legion Space, ASUS Armoury Crate, MSI Center, Dell SupportAssist, HP Omen Gaming Hub and similar. They mix hardware control that has no Windows equivalent (fan curves, power modes, battery charge limits, keyboard light, hotkeys) with news feeds, store promos, game recommendations, telemetry and their own update engine. This profile needs the real hardware; it is not part of the paired evaluation.
 
-## Architecture and where the junk lives
+## Architecture and Where the Junk Lives
 
 - **UI app**: often a Store/MSIX package or Electron/WPF front end. Hosts the news, promo and "recommended" content.
 - **Hardware bridge**: a service plus a vendor WMI/ACPI driver that talks to the embedded controller (EC). Lenovo: Lenovo Vantage Service, System Interface Foundation (SWC device `ImController`, `Lenovo.Modern.ImController.exe` with plug-ins), Energy Management and "Vantage Gaming Feature Driver". These are core for fan, power mode and battery features on many models.
@@ -10,11 +10,11 @@ PC-maker control centers: Lenovo Legion Zone / Vantage / Legion Space, ASUS Armo
 - **Update engine**: system update agent, driver and BIOS updater, often a SYSTEM service plus tasks.
 - **Telemetry and marketing**: data collector services, message/notification services, preinstalled trial software offers.
 
-## Launch, persistence and re-install vectors
+## Launch, Persistence and Re-Install Vectors
 
 This category has vectors that no other profile has: the OS and the firmware install the software for the vendor.
 
-| Vector | Form | Proof it is blocked |
+| Vector | Form | Proof It Is Blocked |
 |---|---|---|
 | Windows Update driver + Software Component (SWC) | A driver INF with a software component child device installs the service and even the UI app (Lenovo ImController returned after a Windows update: https://zhuanlan.zhihu.com/p/838581577) | Device Manager "Software components" shows no new child; service not recreated after a WU cycle |
 | WPBT (Windows Platform Binary Table) | Firmware hands Windows a binary at every boot (Lenovo LSE historically, ASUS installer prompt on some boards) | No new file under `System32` from WPBT after boot; vendor installer not launched |
@@ -31,7 +31,7 @@ This category has vectors that no other profile has: the OS and the firmware ins
 - **Device installation restrictions** by hardware ID can block one SWC device from being installed (approach described at https://ccmexec.com/2025/09/prevent-software-installations-disguised-as-drivers/). Use only for SWC IDs proven to carry junk, never for the hardware bridge.
 - **WPBT**: `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager` `DisableWpbtExecution`=1 is undocumented (https://github.com/Jamesits/dropWPBT). Some vendors offer a firmware toggle or a disabler tool. Owner decision, note it, do not apply by default.
 
-## Core: do not touch
+## Core: Do Not Touch
 
 Write this list per model in the core contract before P4. Default "do not touch" set:
 
@@ -61,13 +61,13 @@ Avoid:
 - WPBT disable as the default lever.
 - Killing the bridge service during a fan or power transition.
 
-## Integrity, anti-tamper and ban risk
+## Integrity, Anti-Tamper and Ban Risk
 
 - No account ban risk; warranty and support risk if the vendor tool is needed for diagnostics. Note it in the analysis.
 - Hardware risk is the real one: a wrong lever can leave fans in a quiet mode under load. The probe below must run under load before and after.
 - Tier: normal for UI and promo helpers; out-of-process for driver packages (never edit INF or driver files).
 
-## Verification probes
+## Verification Probes
 
 Before any change, record a baseline for each item; repeat after apply, after reboot, and after one Windows Update scan.
 
@@ -78,7 +78,7 @@ Before any change, record a baseline for each item; repeat after apply, after re
 5. Device Manager: no new "Software components" children and no vendor service recreated after the WU scan.
 6. No promo or news window within one hour idle (enumerate top-level windows by PID).
 
-## Public projects and recipes
+## Public Projects and Recipes
 
 - Lenovo Legion Toolkit, community replacement for Vantage / Legion Zone / Legion Space with built-in disablers for Vantage, Legion Zone and Hotkeys (GPL-3.0): https://github.com/LenovoLegionToolkit-Team/LenovoLegionToolkit (original repo archived: https://github.com/BartoszCichecki/LenovoLegionToolkit). Note for the owner only: replacing the vendor tool is out of scope for this skill; its disabler list is useful as evidence of which tasks, services, drivers and autoruns each Lenovo app owns.
 - Lenovo ImController uninstall tool (official): https://iknow.lenovo.com.cn/app/detail/201735

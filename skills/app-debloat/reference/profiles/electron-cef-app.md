@@ -11,7 +11,7 @@ Apps whose UI is Chromium: Electron (`resources\app.asar`, `app-update.yml` or S
 
 ## Launch, Persistence and Re-Install Vectors
 
-| Vector | Where to look | Proof it is blocked |
+| Vector | Where to Look | Proof It Is Blocked |
 |---|---|---|
 | electron-updater (NSIS) | `resources\app-update.yml` (feed URL, `publisherName`), staging in `%LOCALAPPDATA%\<name>-updater\pending` | No new files in the staging dir after a forced "check for updates"; version unchanged after restart |
 | Squirrel.Windows | `%LOCALAPPDATA%\<app>\Update.exe`, `app-<version>` sibling dirs, `packages\RELEASES` | No new `app-*` dir after a check; `Update.exe --checkForUpdate` style runs fail |

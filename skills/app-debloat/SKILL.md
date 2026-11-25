@@ -37,14 +37,14 @@ One app per run. Write every finding into the app's `ledger.jsonl` (`reference/l
 
 No two apps are alike; the generic steps only find candidates. Answer each of these in the ledger for THIS app, with an anchor or the word "unknown" and why. A blank answer means the stage is not done.
 
-1. **Category and tier.** Which profile applies? Account-bound with ban risk? Result of the integrity probe (rename one non-critical file, start the app, watch for self-check, repair, forced logout, restore)? Tier `normal` or `out-of-process only`. Tencent-family clients are always `out-of-process only`.
-2. **Injection and integration.** Does it load DLLs into other processes (TSF/IME, shell extension, browser helper, preview handler)? That code shares the host's network identity and cannot be firewalled per program. Which browsers, Office apps, Explorer views and defaults does it plug into, live or dormant?
-3. **The real gate.** Where does the component switch actually live, which copy is read (decoys are common), and is it encrypted, signed or checksummed? If encrypted, derive what is needed at run time from the user's own install; never ship a key.
-4. **Settings that fight back.** Edit the setting, restart the app: did it survive? Settings kept in shared memory are flushed over the file and need a pre-logon edit.
-5. **Server switches.** Which features can a remote config enable, and is the app fail-open or fail-closed when that fetch fails?
-6. **Who writes the install dir.** A SYSTEM service, repair exe, component manager, cloud SDK, Store, Windows Update driver package or OEM updater? Do staging paths move between versions? Is any service driver-protected?
-7. **What only looks like bloat.** Dictionary sync, cloud candidates, hotkeys, fan or EC control, the main window's host process. Each keep gets a reason.
-8. **Cosmetic switches.** Which UI or registry toggles only hide an entry point while the component still loads? Verify by module list, not by file state.
+1. **Category and Tier.** Which profile applies? Account-bound with ban risk? Result of the integrity probe (rename one non-critical file, start the app, watch for self-check, repair, forced logout, restore)? Tier `normal` or `out-of-process only`. Tencent-family clients are always `out-of-process only`.
+2. **Injection and Integration.** Does it load DLLs into other processes (TSF/IME, shell extension, browser helper, preview handler)? That code shares the host's network identity and cannot be firewalled per program. Which browsers, Office apps, Explorer views and defaults does it plug into, live or dormant?
+3. **The Real Gate.** Where does the component switch actually live, which copy is read (decoys are common), and is it encrypted, signed or checksummed? If encrypted, derive what is needed at run time from the user's own install; never ship a key.
+4. **Settings That Fight Back.** Edit the setting, restart the app: did it survive? Settings kept in shared memory are flushed over the file and need a pre-logon edit.
+5. **Server Switches.** Which features can a remote config enable, and is the app fail-open or fail-closed when that fetch fails?
+6. **Who Writes the Install Dir.** A SYSTEM service, repair exe, component manager, cloud SDK, Store, Windows Update driver package or OEM updater? Do staging paths move between versions? Is any service driver-protected?
+7. **What Only Looks Like Bloat.** Dictionary sync, cloud candidates, hotkeys, fan or EC control, the main window's host process. Each keep gets a reason.
+8. **Cosmetic Switches.** Which UI or registry toggles only hide an entry point while the component still loads? Verify by module list, not by file state.
 
 ## Commands
 
@@ -54,8 +54,8 @@ $S = '<skill dir>\scripts'
 & "$S\inventory.ps1" -App 'Youdao|Yodao' -Out <private dir>\before.json   # -App: ASCII only on PS 5.1
 & "$S\inventory.ps1" -AppFile <private dir>\app-regex.txt -Out <private dir>\before.json  # non-ASCII regex in a UTF-8 file
 & "$S\elevated_readonly.ps1" -App 'Youdao|Yodao' -Key youdao -Out <private dir>\elevated  # one UAC; -Key: pipeline.md P0 step 4
-& "$S\launch_monitor.ps1" -Root <root> -Seconds 1200 -Out <private dir>\launch.json  # in the background; then start the app from a normal shell (-Launch <exe> only unelevated)
-& "$S\launch_monitor.ps1" -Root <root> -Attach -Sample -Seconds 300 -Out <private dir>\sample.json  # app already running: CPU, memory, I/O, sockets
+& "$S\launch_monitor.ps1" -Root <root> -Seconds 1200 -Out <private dir>\launch.jsonl  # background; start the app from a normal shell with a private -WorkingDirectory (-Launch only unelevated)
+& "$S\launch_monitor.ps1" -Root <root> -Attach -Sample -Seconds 300 -Out <private dir>\sample.jsonl  # app already running: CPU, memory, I/O, sockets
 python -I "$S\strscan.py" <root> --out <private dir>\strscan.json --summary  # keyword sets in large exe, dll, asar, pak; --list-sets
 python "$S\pe_triage.py" --out <private dir>\triage.json <app>\*.exe <app>\*.dll
 python "$S\snapshot_diff.py" <before.json> <after.json> --out <private dir>\diff.json --summary  # JSON to the file, summary to stdout

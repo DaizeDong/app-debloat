@@ -83,8 +83,12 @@
 .PARAMETER Launch
   Optional exe to start once monitoring is running. -LaunchArgs passes its arguments. Refused
   when the shell is elevated: the app or updater would inherit the admin token. Elevated, leave
-  it out and start the exe from a normal shell after the start line; a process under a -Root is
-  tracked by its path.
+  it out and start the exe from a normal shell after the start line (with Start-Process
+  -WorkingDirectory set to a private folder); a process under a -Root is tracked by its path.
+  The exe starts in launch-cwd\ next to -Out, so debug logs it writes to its current directory
+  stay with the private output instead of landing in the agent's current directory. Files that
+  appear there are the app's own logs and dumps: a note line before the end line lists them.
+  Summarize what matters in the ledger, then delete them before the companion is committed.
 
 .PARAMETER Seconds
   How long to watch. Default 60. For the P1 idle capture and the P6 after-apply capture use the
@@ -691,7 +695,7 @@ function Write-SampleSummary {
 }
 
 # ---------------------------------------------------------------- run
-$fileCount = 0; $launched = $null; $alive = @()
+$fileCount = 0; $launched = $null; $alive = @(); $launchCwd = $null; $launchCwdFiles = @()
 try {
     Emit 'start' ([ordered]@{ roots = $roots; watched = $watched; launch = $Launch; attach = [bool]$Attach; seconds = $Seconds; poll_ms = $PollMs
         elevated = $IsAdmin; start_trace = [bool]$traceSub; watch_names = $WatchNames; conn_count_every_s = $ConnCountEverySeconds
@@ -705,7 +709,12 @@ try {
     if ($Launch) {
         $lp = Norm $Launch
         if (-not (Test-UnderRoot $lp)) { Emit 'note' ([ordered]@{ text = "launch target is not under any -Root; it and its children are tracked through the launch PID only" }) }
-        $sp = @{ FilePath = $lp; PassThru = $true }
+        # A private working directory next to -Out: vendor debug logs written to the current directory land
+        # there instead of in the agent's current directory (which may be a public repo).
+        $launchCwd = Join-Path ([IO.Path]::GetDirectoryName($outPath)) 'launch-cwd'
+        [void][IO.Directory]::CreateDirectory($launchCwd)
+        Emit 'note' ([ordered]@{ text = "launch working directory: $launchCwd" })
+        $sp = @{ FilePath = $lp; PassThru = $true; WorkingDirectory = $launchCwd }
         if ($LaunchArgs) { $sp.ArgumentList = $LaunchArgs }
         $launched = Start-Process @sp
         # Read at once (the Process object keeps a handle, so this works even if the launcher exits right away).
@@ -747,9 +756,19 @@ try {
     if ($traceSub) { Unregister-Event -SourceIdentifier $traceSub -ErrorAction SilentlyContinue; Get-Event -SourceIdentifier $traceSub -ErrorAction SilentlyContinue | Remove-Event }
     if ($Sample -and $sampleLines) { try { Write-SampleSummary } catch { Write-Warning "sample summary failed: $($_.Exception.Message)" } }
     $alive = @($tracked.Keys | Where-Object { $tracked[$_].alive })
+    if ($launchCwd) {
+        # What the app wrote to its working directory (logs, dumps): to be summarized in the ledger and deleted
+        # before the companion is committed, never kept as DATA.
+        try { $launchCwdFiles = @([IO.Directory]::GetFiles($launchCwd, '*', [IO.SearchOption]::AllDirectories) | ForEach-Object { $_.Substring($launchCwd.Length).TrimStart('\') }) } catch { }
+        if ($launchCwdFiles.Count) {
+            Emit 'note' ([ordered]@{ text = "launch working directory holds $($launchCwdFiles.Count) file(s) the app wrote (its own logs or dumps): summarize them in the ledger, then delete them before the companion is committed"
+                launch_cwd = $launchCwd; files = $launchCwdFiles })
+        }
+    }
     Emit 'end' ([ordered]@{ tracked = $tracked.Count; still_running = $alive.Count; file_events = $fileCount; connections = $connSeen.Count; conn_counts = $countLines
         samples = $(if ($Sample) { $sampleLines } else { $null }) })
     $writer.Dispose()
 }
 Write-Host ("tracked processes: {0} ({1} still running), file events: {2}, endpoints: {3}, connection counts: {4}{5}" -f $tracked.Count, $alive.Count, $fileCount, $connSeen.Count, $countLines, $(if ($Sample) { ", samples: $sampleLines" } else { '' }))
+if ($launchCwdFiles.Count) { Write-Host ("launch working directory {0} holds {1} file(s) the app wrote: {2}. Summarize them in the ledger, then delete them before the companion is committed." -f $launchCwd, $launchCwdFiles.Count, ($launchCwdFiles -join ', ')) }
 Write-Host "out: $outPath"

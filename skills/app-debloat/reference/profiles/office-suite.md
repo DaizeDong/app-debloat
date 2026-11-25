@@ -1,8 +1,8 @@
-# Profile: office and PDF suites
+# Profile: Office and PDF Suites
 
 Document suites and PDF tools that bundle a cloud drive, a home page with feeds, template and membership upsell, notifications, AI assistants and an aggressive updater. WPS Office is the reference case; the structure also fits PDF editors and other suites that take over file associations.
 
-## Architecture and where the junk lives
+## Architecture and Where the Junk Lives
 
 WPS Office (Windows), as reported by community sources; verify on the installed version:
 
@@ -15,7 +15,7 @@ WPS Office (Windows), as reported by community sources; verify on the installed 
 - **OEM config**: `office6\cfgs\oem.ini` and `cfgs\oeminfo` (branding, feature flags; enterprise builds carry more). The format is documented by the community at https://github.com/ShinjoKurumi/WPSOfficeConf.
 - Install scope: often per-user under `%LOCALAPPDATA%\Kingsoft\WPS Office\<version>\` (writable without UAC) or `%ProgramFiles(x86)%\Kingsoft\WPS Office\<version>\`. Versioned dirs mean placeholders in an old dir stop working after an update.
 
-## Launch, persistence and re-install vectors
+## Launch, Persistence and Re-Install Vectors
 
 | Vector | Form | Note |
 |---|---|---|
@@ -35,7 +35,7 @@ WPS Office (Windows), as reported by community sources; verify on the installed 
 - **Windows notification settings** per app (AUMID) for toast ads.
 - **Server switches**: home feed and promo content; local changes do not reach them.
 
-## Core: do not touch
+## Core: Do Not Touch
 
 - Editors and their shared libraries, the PDF component if in the contract, fonts and templates the owner uses.
 - The CEF host when the home page or account panels are part of the contract (it is shared UI plumbing).
@@ -62,13 +62,13 @@ Avoid:
 - hosts entries for vendor CDNs shared by templates and fonts.
 - Deleting `oeminfo` or OEM folders on enterprise builds without knowing what they gate.
 
-## Integrity, anti-tamper and ban risk
+## Integrity, Anti-Tamper and Ban Risk
 
 - Account optional; enterprise accounts carry policy risk, not ban risk. Ask the owner if the install is managed by an employer; if so, stop: changes to managed software are the admin's call.
 - Integrity probe: rename one notifier exe in the version dir, start an editor, check for repair prompts or self-heal; restore.
 - Updates create a new version dir; the P7 task must resolve the current dir from the Uninstall key or the newest version folder, then re-assert.
 
-## Verification probes
+## Verification Probes
 
 Use synthetic documents only.
 
@@ -79,7 +79,7 @@ Use synthetic documents only.
 5. Cloud docs (only if in the contract): sign-in state unchanged.
 6. One hour idle plus a reboot: no hot-news or promo window (enumerate top-level windows by PID), no updater process, version dir unchanged.
 
-## Public projects and recipes
+## Public Projects and Recipes
 
 - WPS official guidance (settings, notifications, startup) and its view on hosts/registry tricks: https://www.wps.cn/article/qyhoxotC.html
 - WPS official blog on firewall-blocking cloud helper exes: https://www.wps.com/blog/how-to-disable-annoying-ads-in-wps-office

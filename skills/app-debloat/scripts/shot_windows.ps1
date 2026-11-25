@@ -59,11 +59,22 @@
   Skip windows narrower or shorter than this many pixels. Default 16.
 
 .PARAMETER BubbleTitleRegex
-  Extra case-insensitive title regex for known side-effect bubbles. Built in: Chromium's
-  "Restore pages?" / "didn't shut down correctly" bubble (English and Chinese), which appears
-  after stop_app.ps1 force-closed a Chromium-based app. A small window (under 700x400 physical
-  pixels) whose title matches gets tags = ['restore_pages_bubble'] in the index and in the
-  console line, so it is not read as a new popup. It is still captured.
+  Extra case-insensitive title regex for known side-effect bubbles. Chromium's "Restore pages?"
+  bubble appears after stop_app.ps1 force-closed a Chromium-based app. A small window (at most
+  600x400 at 96 DPI) whose title matches the built-in regex (English and Chinese) or this one gets
+  tags = ['restore_pages_bubble'] and bubble_match = 'title' in the index and on the console: a
+  side effect of the forced close, not a new popup. It is still captured.
+
+.PARAMETER AfterForcedStop
+  Pass it only for the first capture after stop_app.ps1 force-closed a Chromium-based app. Forks
+  localize the bubble or leave its title empty, so this switch adds a shape route: a visible
+  top-level Chrome_WidgetWin_* window with an empty title, between 200x60 and 600x400 at 96 DPI
+  (the monitor's DPI is divided out), while the same process has a visible Chrome_WidgetWin_*
+  main window of at least 500x300 (a minimized one counts by its restored size). Electron and CEF
+  apps use the same window class, and a small untitled ad popup has the same shape, so a shape
+  match is only a possible bubble: it gets bubble_match = 'shape', is counted under
+  possible_restore_bubbles (not restore_pages_bubbles), and the console says to check the
+  capture. Without the switch, only the title route runs.
 
 .PARAMETER SkipClassRegex
   Extra case-insensitive regex on window class names to treat as IME windows (listed, never
@@ -81,6 +92,7 @@ param(
     [string]$Tag,
     [int]$MinSize = 16,
     [string]$BubbleTitleRegex,
+    [switch]$AfterForcedStop,
     [string]$SkipClassRegex
 )
 $ErrorActionPreference = 'Stop'
@@ -133,10 +145,19 @@ public static class AdShot {
     [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
     [StructLayout(LayoutKind.Sequential)] struct WINDOWPLACEMENT { public int length, flags, showCmd, minX, minY, maxX, maxY; public RECT normal; }
     [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT p);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+    [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr m, int type, out uint x, out uint y);
+    // Effective DPI of the window's monitor, as this per-monitor aware process sees it; 96 when unknown.
+    static uint MonitorDpi(IntPtr h) {
+        try { uint x, y; if (GetDpiForMonitor(MonitorFromWindow(h, 2), 0, out x, out y) == 0 && x > 0) return x; } catch (Exception) { }
+        return 96;
+    }
 
     // NW, NH: the restored (normal) size, which a minimized window's own rect does not show.
     // PlFlags: WINDOWPLACEMENT.flags; WPF_RESTORETOMAXIMIZED (2) means it restores maximized, not to NW x NH.
-    public class Win { public long Hwnd; public uint Pid; public string Cls; public string Title; public bool Visible; public bool Iconic; public bool Cloaked; public int L, T, R, B; public int VL, VT, VR, VB; public int NW, NH; public int PlFlags; }
+    // Owner: GW_OWNER window (0 when none). Dpi: effective DPI of the window's monitor.
+    public class Win { public long Hwnd; public uint Pid; public string Cls; public string Title; public bool Visible; public bool Iconic; public bool Cloaked; public int L, T, R, B; public int VL, VT, VR, VB; public int NW, NH; public int PlFlags; public long Owner; public uint Dpi; }
     // Top-level windows; hidden ones too when includeHidden (they are listed, never captured).
     public static Win[] TopLevel(bool includeHidden) {
         var res = new List<Win>();
@@ -152,7 +173,8 @@ public static class AdShot {
             var wp = new WINDOWPLACEMENT(); wp.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
             if (!GetWindowPlacement(h, ref wp)) { wp.normal = new RECT(); wp.flags = 0; }
             res.Add(new Win { Hwnd = h.ToInt64(), Pid = pid, Cls = c.ToString(), Title = t.ToString(), Visible = vis, Iconic = IsIconic(h), Cloaked = cloak != 0,
-                L = r.L, T = r.T, R = r.R, B = r.B, VL = v.L, VT = v.T, VR = v.R, VB = v.B, NW = wp.normal.R - wp.normal.L, NH = wp.normal.B - wp.normal.T, PlFlags = wp.flags });
+                L = r.L, T = r.T, R = r.R, B = r.B, VL = v.L, VT = v.T, VR = v.R, VB = v.B, NW = wp.normal.R - wp.normal.L, NH = wp.normal.B - wp.normal.T, PlFlags = wp.flags,
+                Owner = GetWindow(h, 4).ToInt64(), Dpi = MonitorDpi(h) });
             return true;
         };
         EnumWindows(cb, IntPtr.Zero); GC.KeepAlive(cb);
@@ -231,17 +253,44 @@ function Test-Match([string]$img) {
     $false
 }
 
-# Chromium's crash-restore bubble ("Restore pages?" / "... didn't shut down correctly"), also in zh-CN and zh-TW.
-# The Chinese alternatives are .NET \u escapes, so this file stays ASCII.
+# Chromium's crash-restore bubble. Recognized by title: "Restore pages?" / "... didn't shut down correctly", also in
+# zh-CN and zh-TW. The Chinese alternatives are .NET \u escapes, so this file stays ASCII. With -AfterForcedStop also by
+# shape (a small untitled Chrome_WidgetWin_* window beside a main window of the same process), because forks localize
+# its text or leave the title empty; a small untitled popup has the same shape, so a shape match is only possible.
 $restoreRx = New-Object regex(('restore pages|did(n''t| not) shut down correctly|\u6062\u590d(\u9875\u9762|\u7f51\u9875)|\u6062\u5fa9(\u9801\u9762|\u7db2\u9801)|\u672a\u6b63\u786e\u5173\u95ed|\u672a\u6b63\u78ba\u95dc\u9589' +
     $(if ($BubbleTitleRegex) { '|' + $BubbleTitleRegex } else { '' })), 'IgnoreCase')
-# Tags of one window as plain strings (none: nothing). Callers wrap the result in @().
-function Get-WindowTags($w) {
-    $vw = $w.VR - $w.VL; $vh = $w.VB - $w.VT
-    if ($w.Title -and $vw -lt 700 -and $vh -lt 400 -and $restoreRx.IsMatch($w.Title)) { 'restore_pages_bubble' }
+$chromeRx = New-Object regex('^Chrome_WidgetWin_\d+$')
+# Size at 96 DPI (the monitor's DPI divided out); a minimized window counts by its restored size.
+function Get-Size96($w) {
+    $k = 96.0 / [math]::Max(1, $w.Dpi)
+    if ($w.Iconic) { if ($w.PlFlags -band 2) { return @(100000, 100000) }; return @(($w.NW * $k), ($w.NH * $k)) }
+    @((($w.VR - $w.VL) * $k), (($w.VB - $w.VT) * $k))
 }
-$tagMeaning = [ordered]@{ restore_pages_bubble = 'Chromium crash-restore bubble, a side effect of a forced close (stop_app.ps1); not a new popup' }
-$tagNote = @{ restore_pages_bubble = 'side effect of a forced close, not a new popup' }
+# Visible Chromium widget windows by PID: the candidates for a bubble's main window.
+$chromeByPid = @{}
+# 'title', 'shape' (only with -AfterForcedStop) or nothing: how a visible window matched the restore-pages bubble.
+function Get-BubbleMatch($w) {
+    if (-not $w.Visible -or $w.Iconic) { return }
+    $s = Get-Size96 $w
+    if ($s[0] -gt 600 -or $s[1] -gt 400) { return }
+    if ($w.Title) { if ($restoreRx.IsMatch($w.Title)) { 'title' }; return }
+    if (-not $AfterForcedStop) { return }
+    if (-not $chromeRx.IsMatch($w.Cls) -or $s[0] -lt 200 -or $s[1] -lt 60) { return }
+    $cands = $chromeByPid[[int]$w.Pid]   # a List; @() around it throws on PowerShell 5.1
+    if (-not $cands) { return }
+    foreach ($m in $cands) {
+        if ($m.Hwnd -eq $w.Hwnd) { continue }
+        $ms = Get-Size96 $m
+        if ($ms[0] -ge 500 -and $ms[1] -ge 300) { return 'shape' }
+    }
+}
+$tagMeaning = [ordered]@{ restore_pages_bubble = ('Chromium crash-restore bubble after a forced close (stop_app.ps1). ' +
+    'bubble_match title: its title matched, a side effect of the forced close, not a new popup. ' +
+    'bubble_match shape (-AfterForcedStop only): a small untitled Chrome_WidgetWin window beside a main window of the same process; ' +
+    'a small untitled popup looks the same, so it is only possibly the bubble: check the capture') }
+# Console note per match route: only a title match is ruled out as a popup.
+$bubbleNote = @{ title = 'side effect of a forced close, not a new popup (matched by title)'
+    shape = 'possibly the restore-pages bubble (shape only); a small untitled popup looks the same: check the capture' }
 
 $outDir = [IO.Path]::GetFullPath($Out)
 [void][IO.Directory]::CreateDirectory($outDir)
@@ -263,7 +312,14 @@ foreach ($pr in [Diagnostics.Process]::GetProcesses()) {
 }
 $index = New-Object System.Collections.Generic.List[object]
 $seq = 0
-foreach ($w in [AdShot]::TopLevel($true)) {
+$all = [AdShot]::TopLevel($true)
+foreach ($w in $all) {
+    if ($w.Visible -and $w.Pid -ne $PID -and $chromeRx.IsMatch($w.Cls)) {
+        if (-not $chromeByPid.ContainsKey([int]$w.Pid)) { $chromeByPid[[int]$w.Pid] = New-Object System.Collections.Generic.List[object] }
+        $chromeByPid[[int]$w.Pid].Add($w)
+    }
+}
+foreach ($w in $all) {
     if ($w.Pid -eq $PID) { continue }
     if (-not $imgCache.ContainsKey($w.Pid)) { $imgCache[$w.Pid] = [AdShot]::ImagePath($w.Pid) }
     $img = $imgCache[$w.Pid]
@@ -285,14 +341,16 @@ foreach ($w in [AdShot]::TopLevel($true)) {
     }
     $alive[[int]$w.Pid] = $true
     $seq++
+    $bubble = Get-BubbleMatch $w
     $e = [ordered]@{
         hwnd = ('0x{0:x}' -f $w.Hwnd); pid = [int]$w.Pid; image = $img; class = $w.Cls; title = $w.Title; visible = $true
+        owner = $(if ($w.Owner) { '0x{0:x}' -f $w.Owner } else { $null }); monitor_dpi = [int]$w.Dpi
         rect = @($w.L, $w.T, $w.R, $w.B); visible_rect = @($w.VL, $w.VT, $w.VR, $w.VB)
         # A window that restores maximized gets no restored_size: its normal rect is the pre-maximize size.
         minimized = [bool]$w.Iconic; restores_maximized = $(if ($w.Iconic) { ($w.PlFlags -band 2) -ne 0 } else { $null })
         restored_size = $(if ($w.Iconic -and -not ($w.PlFlags -band 2) -and $w.NW -gt 0 -and $w.NH -gt 0) { @($w.NW, $w.NH) } else { $null }); cloaked = [bool]$w.Cloaked
         window_dpi = $null; file = $null; blank = $null; print_flags = $null; skipped = $null; error = $null
-        tags = @(Get-WindowTags $w)
+        tags = @($(if ($bubble) { 'restore_pages_bubble' })); bubble_match = $bubble
     }
     if ($w.Iconic) { $e.skipped = 'minimized: window present, not captured (restoring it would be input to the owner''s window)' }
     elseif ($w.Cloaked) { $e.skipped = 'cloaked by DWM' }
@@ -316,27 +374,30 @@ $hiddenN = @($index | Where-Object { -not $_.visible }).Count
 $shot = @($app | Where-Object { $_.file }).Count
 $minN = @($app | Where-Object { $_.minimized }).Count
 $blankN = @($app | Where-Object { $_.blank }).Count
-$bubbleN = @($app | Where-Object { $_.tags -contains 'restore_pages_bubble' }).Count
+$bubbleN = @($app | Where-Object { $_.bubble_match -eq 'title' }).Count
+$maybeN = @($app | Where-Object { $_.bubble_match -eq 'shape' }).Count
 $doc = [ordered]@{
     schema = 'app-debloat.shots/1'; captured_at = (Get-Date).ToUniversalTime().ToString('o')
     dpi_awareness = $dpiNow; dpi_set = $dpiSet
-    match = [ordered]@{ image_path_regex = $ImagePathRegex; roots = @($Root); bubble_title_regex = $BubbleTitleRegex; skip_class_regex = $SkipClassRegex }
+    match = [ordered]@{ image_path_regex = $ImagePathRegex; roots = @($Root); bubble_title_regex = $BubbleTitleRegex; after_forced_stop = [bool]$AfterForcedStop; skip_class_regex = $SkipClassRegex }
     # matched counts the app's visible windows only; IME and hidden windows are listed apart.
+    # restore_pages_bubbles: title matches only. possible_restore_bubbles: shape matches, which may be popups.
     counts = [ordered]@{ matched = $app.Count; captured = $shot; minimized = $minN; blank = $blankN; restore_pages_bubbles = $bubbleN
-        ime_skipped = $imeN; hidden = $hiddenN; processes_alive = $alive.Count }
+        possible_restore_bubbles = $maybeN; ime_skipped = $imeN; hidden = $hiddenN; processes_alive = $alive.Count }
     tag_meaning = $tagMeaning
     windows = $index.ToArray()
 }
 $idxPath = Join-Path $outDir ($prefix + 'index.json')
 [IO.File]::WriteAllText($idxPath, ($doc | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 
-Write-Host ("windows matched: {0}, captured: {1}, minimized: {2}, blank: {3}, other skipped or failed: {4}, restore-pages bubbles: {5}, IME skipped: {6}, hidden listed: {7}, processes alive: {8}, dpi: {9}" -f `
-    $app.Count, $shot, $minN, $blankN, ($app.Count - $shot - $minN), $bubbleN, $imeN, $hiddenN, $alive.Count, $dpiNow)
+Write-Host ("windows matched: {0}, captured: {1}, minimized: {2}, blank: {3}, other skipped or failed: {4}, restore-pages bubbles: {5}, possible bubbles by shape (check the capture): {6}, IME skipped: {7}, hidden listed: {8}, processes alive: {9}, dpi: {10}" -f `
+    $app.Count, $shot, $minN, $blankN, ($app.Count - $shot - $minN), $bubbleN, $maybeN, $imeN, $hiddenN, $alive.Count, $dpiNow)
 foreach ($e in $index) {
     $state = $(if ($e.file) { $e.file + $(if ($e.blank) { ' (blank)' } else { '' }) }
                elseif ($e.minimized) { 'minimized: window present, not captured' + $(if ($e.restores_maximized) { ' (restores maximized)' } elseif ($e.restored_size) { " (restored size $($e.restored_size -join 'x'))" } else { '' }) }
                elseif ($e.skipped) { 'skipped: ' + $e.skipped } else { 'error: ' + $e.error })
-    $tagText = $(if (@($e.tags).Count) { ' [' + ((@($e.tags) | ForEach-Object { if ($tagNote[$_]) { "$_`: $($tagNote[$_])" } else { $_ } }) -join '; ') + ']' } else { '' })
+    $tagText = $(if (@($e.tags).Count) { ' [' + ((@($e.tags) | ForEach-Object {
+        if ($_ -eq 'restore_pages_bubble' -and $e.bubble_match) { "$_`: $($bubbleNote[$e.bubble_match])" } else { $_ } }) -join '; ') + ']' } else { '' })
     Write-Host ("  pid {0} {1} '{2}' -> {3}{4}" -f $e.pid, $e.class, $e.title, $state, $tagText)
 }
 if (-not $app.Count) {

@@ -6,7 +6,7 @@ A profile encodes what is DIFFERENT for one kind of app: where the junk lives, h
 
 Answer in order; the first match is the primary profile.
 
-| Question (check on disk, not from memory) | Primary profile |
+| Question (Check on Disk, Not from Memory) | Primary Profile |
 |---|---|
 | Registered as a TSF text service (`HKLM\SOFTWARE\Microsoft\CTF\TIP\{CLSID}`) or ships `*.ime` files | `ime.md` |
 | Publisher is Tencent, or it ships `QQProtect`, `QPCore`, `WeixinUpdate.exe`, a QQNT `versions\config.json` | `tencent-im.md` |
@@ -32,18 +32,18 @@ Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\CTF\TIP' | ForEach-Object { (Get-ItemPro
 Get-ChildItem -LiteralPath $root -Recurse -Filter *.exe | ForEach-Object { (Get-AuthenticodeSignature -LiteralPath $_.FullName).SignerCertificate.Subject } | Sort-Object -Unique
 ```
 
-## What Every Profile States, and What the Pipeline Does With It
+## What Every Profile States, and What the Pipeline Does with It
 
-| Profile section | Feeds pipeline step |
+| Profile Section | Feeds Pipeline Step |
 |---|---|
-| Architecture and where junk lives | P1 inventory scope |
-| Launch, persistence, re-install vectors | P1 snapshot list, P3 vector matrix |
+| Architecture and Where the Junk Lives | P1 inventory scope |
+| Launch, Persistence and Re-Install Vectors | P1 snapshot list, P3 vector matrix |
 | Gates | P2 gate hunt |
-| Core: do not touch | P0 core-function contract, P4 classification |
-| Levers (use / avoid) | P4 plan, P5 script primitives |
-| Integrity and ban risk | P0 risk tier (normal or out-of-process only) |
-| Verification probes | P6 core-function probe |
-| Public projects and recipes | P2/P3 hypotheses only, every claim re-verified on the installed version |
+| Core: Do Not Touch | P0 core-function contract, P4 classification |
+| Levers (Use / Avoid) | P4 plan, P5 script primitives |
+| Integrity and Ban Risk | P0 risk tier (normal or out-of-process only) |
+| Verification Probes | P6 core-function probe |
+| Public Projects and Recipes | P2/P3 hypotheses only, every claim re-verified on the installed version |
 
 Risk tiers used by every profile:
 
@@ -59,7 +59,7 @@ Least likely to be flagged or reverted first:
 3. Disable (never delete) vendor services; record original start type and recovery actions.
 4. Disable (never delete) scheduled tasks.
 5. Outbound firewall rule by program path for a helper that has no core duty.
-6. IFEO `Debugger` for vendor-unique helper names only, pointing at a benign target; re-read after a delay because Defender can remove it.
+6. IFEO `Debugger` for vendor-unique helper names only, pointing at a path that does not exist (the engine's `ifeo-block`); re-read after a delay because Defender can remove it.
 
 Never in any profile: binary patching, redistributing modified installers, extracted keys or decrypted configs in the public repo, hosts entries for shared CDNs or Microsoft domains, `sc delete`, disabling Defender, killing processes by name.
 

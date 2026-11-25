@@ -2,13 +2,21 @@
 
 All notable changes to this project are documented here (Keep a Changelog style).
 
+## [1.0.0] - 2026-11-25
+### Changed
+- First stable release: the P0 to P7 pipeline, the evidence ledger, seven category profiles plus a generic picker, the read-only analysis tools and the manifest engine with 18 action types, exercised in live apply, verify and watch-task runs on Youdao Translate 11.3.24.0, Quark 7.4.9.1045 and Baidu Netdisk 8.2.1.102.
+- `shot_windows.ps1` recognizes Chromium's restore-pages bubble by shape as well as by title (English and Chinese), so a fork's untitled bubble is tagged. The shape route (a small untitled `Chrome_WidgetWin_*` window beside a main window of the same process, sized at 96 DPI) runs only with `-AfterForcedStop`, and its matches are reported as possible bubbles and counted apart from title matches, because a small untitled popup has the same shape; the index records `bubble_match`, `owner` and `monitor_dpi`.
+- `launch_monitor.ps1 -Launch` starts the exe in `launch-cwd\` next to `-Out`, and the pipeline and safety rules require a private working directory for every manual start of a vendor exe (`Start-Process -WorkingDirectory`, updater triggers, `frida -f`), so vendor debug logs never land in the agent's current directory. The monitor lists the files the app wrote to `launch-cwd\` in a `note` line before `end`, to be summarized in the ledger and deleted before the companion is committed.
+- README and README_CN rewritten: what the skill detects (cross-app hijacks included), the levers and engine action types, the safety model and the public Sogou Pinyin case built with it; PHILOSOPHY gains the cross-app reach principle; ROADMAP describes the current scope.
+- Reference consistency: overlay slots stated as 11 of Explorer's 15 everywhere, the IFEO target is the engine's nonexistent path (no stub option), built script named `<App>Debloat.ps1` throughout; headings, bold lead-ins and table headers in Title Case.
+
 ## [0.1.7] - 2026-11-24
 ### Changed
 - Hijack coverage from three real sweeps: inventory sections browser (native messaging hosts, extensions, policies), office_addins, dormant_payloads, shell_namespace, overlay rank and pushed-out overlays, default_apps, shell_new, consent_store, settings (redacted), devtools, upnp, listen scope, staged installers, Uninstall-name matching; engine types reg-delete-value and browser-ext-block, reg-delete-key matchDefault, reg-set Binary; launch_monitor -Sample/-Attach; strscan.py keyword scanner; pipeline steps for cross-app integration, network exposure and P2P, in-app setting discovery; Settings Map.
 
 ## [0.1.6] - 2026-11-23
 ### Changed
-- Durability round on the three live apps: deleted placeholders are re-created from the journal (incl. under the tool's own deny ACE), history lines report held counts, vendor-restored binaries with a new hash are kept as backups, token/cookie redaction in captured command lines, launch_monitor refuses an elevated -Launch and sets a private working directory, new_files_since.py for staged downloads outside the roots, P7 revert tests, ledger.jsonl as the single store from P0.
+- Durability round on the three live apps: deleted placeholders are re-created from the journal (incl. under the tool's own deny ACE), history lines report held counts, vendor-restored binaries with a new hash are kept as backups, token/cookie redaction in captured command lines, launch_monitor refuses an elevated -Launch, new_files_since.py for staged downloads outside the roots, P7 revert tests, ledger.jsonl as the single store from P0.
 
 ## [0.1.5] - 2026-11-23
 ### Changed

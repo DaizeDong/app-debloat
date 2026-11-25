@@ -165,7 +165,7 @@ Every undo first compares the current state with the state the tool wrote (the j
 original only when they are equal, reports SKIP when the original is already back, GONE when the object no longer
 exists, and CONFLICT (left untouched) for anything else.
 
-| type | fields | does | undo (only from the state the tool wrote) |
+| Type | Fields | Does | Undo (Only from the State the Tool Wrote) |
 |---|---|---|---|
 | `service-disable` | `target[]` names, `stop` | `sc config start= disabled`, stops it if running | if still Disabled, restores Auto (delayed-auto kept) or Manual |
 | `task-disable` | `target[]` `\Path\Name*` (that folder only), or `taskPath` (a folder, searched with all its subfolders) plus `target[]` name patterns (default `*`) | disables matching tasks; records each task's action identity (Execute, Arguments, ClassId). Every search prints its match count | re-enables only if the task still runs the recorded action |
@@ -188,7 +188,7 @@ exists, and CONFLICT (left untouched) for anything else.
 
 **Placeholders That Disappear.** A cleaner, an updater or the user may delete a placeholder folder or file. A glob
 target resolves only against items that exist, and without `createIfMissing` a missing literal target plans
-nothing, so such a block used to lapse with `0 change(s), 0 failure(s)` and no other sign. The plan therefore also
+nothing, so such a block would lapse with `0 change(s), 0 failure(s)` and no other sign. The plan therefore also
 reads the active journal entries of the action: every `file2dir` or `dir2file` entry whose path is now missing is
 planned again (`Re-create placeholder directory (deleted since it was placed): <path>`) in every mode, with the kind
 taken from the entry's after-state and the same `fs:` key, so the journal keeps its first original (an identical
@@ -316,14 +316,14 @@ A vendor that writes its value back at every start is answered with `reapply`: t
 journal keeps the first original, so `-Uninstall` re-creates the value as it was first found, not as the vendor last
 wrote it. A search that finds nothing prints one SKIP line per target with the number of keys searched.
 
-**Run keys.** Under `...\CurrentVersion\Run`, `RunOnce`, `RunServices`, `RunServicesOnce` and the same names under
+**Run Keys.** Under `...\CurrentVersion\Run`, `RunOnce`, `RunServices`, `RunServicesOnce` and the same names under
 `Policies\Explorer` (any view), a value is deleted only when it starts a program under the install root or an
 `allowedRoots` entry: the quoted path, or the text up to the first `.exe`, environment variables expanded, compared as
 written and as its real path. A value that starts another program, or names no full program path (`rundll32.exe
 "...",Entry`), fails the action at plan time with `refused value <key> <name>: ...`, so a broad `match` cannot remove
 another app's autostart. `StartupApproved\Run` is not a Run key; its values are flags.
 
-**Binary data.** `reg-set` with `"kind": "Binary"` takes the data as a hex byte string; spaces, commas, dashes and a
+**Binary Data.** `reg-set` with `"kind": "Binary"` takes the data as a hex byte string; spaces, commas, dashes and a
 `hex:` prefix are ignored (`"03 00 00 00 00 00 00 00 00 00 00 00"`). Binary and `REG_NONE` data are journaled,
 compared and printed as lowercase hex. The Windows startup switch is the usual use: `03` in the first byte means
 disabled, `02` enabled, and an app that rewrites its own Run value cannot undo it:

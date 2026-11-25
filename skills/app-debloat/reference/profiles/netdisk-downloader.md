@@ -47,7 +47,7 @@ Quark 7.x (the drive inside a Chromium fork, `chromium-fork.md`):
 
 ## Launch, Persistence and Re-Install Vectors
 
-| Vector | Typical form | Notes |
+| Vector | Typical Form | Notes |
 |---|---|---|
 | Own updater dir | `AutoUpdate\` (Baidu), `AutoUpdate\Download\MainApp` holds a downloaded full package | A community report says new builds download a ~400 MB cab on every start until the dir is locked (https://www.bilibili.com/opus/790781351497302041, unverified) |
 | Kernel or diagnose updater | `kernelUpdate.exe`, `autoDiagnoseUpdate.exe` | Separate path from the UI updater; deleting `AutoUpdate` alone is not enough (https://meta.appinn.net/t/topic/72072) |

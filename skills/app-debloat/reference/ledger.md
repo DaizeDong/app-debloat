@@ -92,7 +92,7 @@ follows the same rule: build the object and serialize it, never type it through 
 
 `L-<KIND>-<NNN>`, numbered per kind in creation order, three digits, never reused.
 
-| Kind | Claim it holds | Typical source |
+| Kind | Claim It Holds | Typical Source |
 |---|---|---|
 | `INV` | A component, file, key, service, task or registration exists (and its role guess) | `inventory.ps1` snapshot |
 | `EDGE` | A launches, loads or injects B (process spawn, DLL load, COM activation, TSF/shell load) | runtime capture, `pe_triage.py` xrefs |
@@ -122,7 +122,7 @@ search or test performed and its coverage.
 
 ## Status
 
-| Status | Meaning | Minimum anchor |
+| Status | Meaning | Minimum Anchor |
 |---|---|---|
 | `observed` | Seen happening or read directly from live state | runtime capture (`cmdline`, `log`, `net`, `frida`) or a live `reg`/`file`/`snapshot` read |
 | `anchored` | A complete static chain in this exact build: the config read or string reaches the launch or load API with no reasoning gap, plus a toggle test where the claim is a GATE | `pe` or `xref` anchors for every hop, each paired with the file hash |
@@ -297,7 +297,7 @@ to `plan.md` section 5 as an owner action with its menu path.
 
 ## Mapping Tool Output to Anchors
 
-| Tool output | Ledger use |
+| Tool Output | Ledger Use |
 |---|---|
 | `inventory.ps1` item (`key`, `match`) | `INV` entry with a `snapshot` anchor; `processes[].command_line` and `parent_*` give `cmdline` anchors |
 | `inventory.ps1` `access_failures`, `notes` | coverage statement on any `negative` entry |
